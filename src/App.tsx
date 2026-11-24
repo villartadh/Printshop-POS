@@ -1,4 +1,5 @@
 import React from 'react';
+import { AppStateProvider } from './context/AppStateContext.tsx';
 import { AppProvider, useApp } from './context/AppContext.tsx';
 import { AuthScreen } from './modules/auth/AuthScreen.tsx';
 import { PinLockModal } from './modules/auth/PinLockModal.tsx';
@@ -32,8 +33,10 @@ const RootRouter: React.FC = () => {
 
 export default function App() {
   return (
-    <AppProvider>
-      <RootRouter />
-    </AppProvider>
+    <AppStateProvider>
+      <AppProvider>
+        <RootRouter />
+      </AppProvider>
+    </AppStateProvider>
   );
 }

@@ -72,8 +72,10 @@ export const AppShell: React.FC = () => {
     syncNow,
     loadingData,
     dataError,
+    categories,
+    services,
     refreshBootstrap,
-    saveSettings,
+    setThemeMode,
     toasts,
     dismissToast,
   } = useApp();
@@ -114,14 +116,11 @@ export const AppShell: React.FC = () => {
       window.matchMedia?.('(prefers-color-scheme: dark)').matches);
 
   const toggleQuickTheme = () => {
-    void saveSettings({
-      ...settings,
-      themeMode: isDark ? 'light' : 'dark',
-    });
+    setThemeMode(isDark ? 'light' : 'dark');
   };
 
   const renderModule = () => {
-    if (loadingData && settings.updatedAt === '') {
+    if (loadingData && categories.length === 0 && services.length === 0) {
       return <LoadingState rows={6} />;
     }
     if (dataError) {
@@ -296,7 +295,16 @@ export const AppShell: React.FC = () => {
                 style={{ backgroundColor: settings.tokens.primary }}
                 className="h-8 w-8 rounded-lg flex items-center justify-center text-white shrink-0"
               >
-                <Printer className="w-4 h-4" />
+                {settings.branding.logoDataUrl ? (
+                  <img
+                    src={settings.branding.logoDataUrl}
+                    alt={settings.branding.appName}
+                    className="h-5 w-5 object-contain rounded"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <Printer className="w-4 h-4" />
+                )}
               </div>
             )}
             <div className="min-w-0">

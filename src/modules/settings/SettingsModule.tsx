@@ -11,7 +11,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { DEFAULT_SETTINGS } from '../../shared/defaults.ts';
 import { apiRequest, getMemoryToken } from '../../services/apiClient.ts';
 import type {
   AppSettings,
@@ -45,6 +44,9 @@ export const SettingsModule: React.FC = () => {
     lastSyncedAt,
     session,
     saveSettings,
+    setThemeMode,
+    setDensity,
+    resetSettingsToDefaults,
     syncNow,
     seedDemo,
     clearDemo,
@@ -186,12 +188,15 @@ export const SettingsModule: React.FC = () => {
             Customize branding, design tokens, layout density, tax rules, users, and offline sync
           </p>
         </div>
-        {canConfigure && (
+        {canConfigure ? (
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setDraft({ ...DEFAULT_SETTINGS, updatedAt: new Date().toISOString() })}
+              onClick={() => {
+                resetSettingsToDefaults();
+                notify('Default settings restored locally. Click Save Changes to sync.', 'info');
+              }}
             >
               <RotateCcw className="w-3.5 h-3.5" />
               Reset Defaults
@@ -200,6 +205,17 @@ export const SettingsModule: React.FC = () => {
               Save Changes
             </Button>
           </div>
+        ) : (
+          <Button
+            size="sm"
+            onClick={() => {
+              setThemeMode(draft.themeMode);
+              setDensity(draft.density);
+              notify('Display theme and density saved for this device.', 'success');
+            }}
+          >
+            Save Display Preferences
+          </Button>
         )}
       </div>
 

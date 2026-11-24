@@ -1,12 +1,15 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { DEFAULT_SETTINGS } from '../shared/defaults.ts';
+import { useAppState } from './AppStateContext.tsx';
 import type {
   AppSettings,
   AuditLogEntry,
   AuthSession,
+  BrandingConfig,
   CashierShift,
   Customer,
+  DesignTokens,
   ExpenseRecord,
+  InterfaceDensity,
   InventoryItem,
   ModuleId,
   OfflineMutation,
@@ -15,6 +18,7 @@ import type {
   PrintService,
   ServiceCategory,
   StockMovement,
+  ThemeMode,
   Transaction,
   UserAccount,
 } from '../shared/types.ts';
@@ -121,6 +125,11 @@ interface AppContextValue {
   // Domain Actions
   refreshBootstrap: () => Promise<void>;
   saveSettings: (next: AppSettings) => Promise<void>;
+  setThemeMode: (mode: ThemeMode) => void;
+  setDensity: (density: InterfaceDensity) => void;
+  updateBranding: (patch: Partial<BrandingConfig>) => void;
+  updateTokens: (patch: Partial<DesignTokens>) => void;
+  resetSettingsToDefaults: () => void;
   submitTransaction: (txn: Transaction) => Promise<{ transaction: Transaction; queuedOffline: boolean }>;
   deleteHeldOrder: (id: string) => Promise<void>;
   voidTransaction: (id: string, reason: string) => Promise<void>;
@@ -171,6 +180,17 @@ export function useApp() {
 }
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const {
+    settings,
+    hasLocalCustomizations,
+    setSettingsState,
+    updateBranding,
+    updateTokens,
+    setThemeMode,
+    setDensity,
+    resetSettingsToDefaults,
+  } = useAppState();
+
   const isOnline = useOnlineStatus();
   const [authChecked, setAuthChecked] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
@@ -184,8 +204,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [loadingData, setLoadingData] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
-
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [categories, setCategories] = useState<ServiceCategory[]>([]);
   const [services, setServices] = useState<PrintService[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -215,64 +233,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Apply design tokens, theme, density, and font dynamically to :root
-  useEffect(() => {
-    const root = document.documentElement;
-    const { tokens, themeMode, density, branding } = settings;
-
-    const prefersDark =
-      typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-color-scheme: dark)').matches;
-    const shouldBeDark = themeMode === 'dark' || (themeMode === 'system' && prefersDark);
-
-    root.classList.toggle('dark', shouldBeDark);
-    root.setAttribute('data-density', density);
-
-    root.style.setProperty('--pos-primary', tokens.primary);
-    root.style.setProperty('--pos-primary-hover', tokens.primaryHover);
-    root.style.setProperty('--pos-nav-bg', tokens.navBackground);
-    root.style.setProperty('--pos-success', tokens.success);
-    root.style.setProperty('--pos-warning', tokens.warning);
-    root.style.setProperty('--pos-error', tokens.error);
-    root.style.setProperty('--pos-info', tokens.info);
-    root.style.setProperty('--pos-radius', `${tokens.borderRadiusPx}px`);
-    root.style.setProperty('--pos-scale', String(tokens.fontSizeScale || 1));
-    root.style.setProperty(
-      '--pos-font',
-      `"${tokens.fontFamily}", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`,
-    );
-
-    if (!shouldBeDark) {
-      root.style.setProperty('--pos-bg', tokens.appBackground);
-      root.style.setProperty('--pos-surface', tokens.surface);
-      root.style.setProperty('--pos-text', tokens.primaryText);
-      root.style.setProperty('--pos-text-muted', tokens.secondaryText);
-      root.style.setProperty('--pos-border', tokens.border);
-    } else {
-      root.style.removeProperty('--pos-bg');
-      root.style.removeProperty('--pos-surface');
-      root.style.removeProperty('--pos-text');
-      root.style.removeProperty('--pos-text-muted');
-      root.style.removeProperty('--pos-border');
-    }
-
-    document.title = `${branding.appName || 'Printshop POS'} — ${branding.businessName || branding.tagline}`;
-  }, [settings]);
-
-  const applyBootstrapData = useCallback((data: BootstrapPayload) => {
-    setSettings(data.settings);
-    setCategories(data.categories);
-    setServices(data.services);
-    setInventory(data.inventory);
-    setStockMovements(data.stockMovements);
-    setCustomers(data.customers);
-    setTransactions(data.transactions);
-    setPrintJobs(data.printJobs);
-    setExpenses(data.expenses);
-    setShifts(data.shifts);
-    setUsers(data.users);
-    setAuditLogs(data.auditLogs);
-  }, []);
+  const applyBootstrapData = useCallback(
+    (data: BootstrapPayload) => {
+      const serverTs = Date.parse(data.settings?.updatedAt || '') || 0;
+      const localTs = Date.parse(settings.updatedAt || '') || 0;
+      if (!hasLocalCustomizations || serverTs > localTs) {
+        setSettingsState(data.settings);
+      }
+      setCategories(data.categories);
+      setServices(data.services);
+      setInventory(data.inventory);
+      setStockMovements(data.stockMovements);
+      setCustomers(data.customers);
+      setTransactions(data.transactions);
+      setPrintJobs(data.printJobs);
+      setExpenses(data.expenses);
+      setShifts(data.shifts);
+      setUsers(data.users);
+      setAuditLogs(data.auditLogs);
+    },
+    [hasLocalCustomizations, setSettingsState, settings.updatedAt],
+  );
 
   const refreshBootstrap = useCallback(async () => {
     setLoadingData(true);
@@ -442,13 +423,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const saveSettings = async (next: AppSettings) => {
-    setSettings(next);
-    const updated = await apiRequest<AppSettings>('/api/settings', {
-      method: 'PUT',
-      body: JSON.stringify(next),
-    });
-    setSettings(updated);
-    notify('Settings saved.', 'success');
+    const stamped: AppSettings = {
+      ...next,
+      updatedAt: new Date().toISOString(),
+    };
+    const persisted = setSettingsState(stamped);
+
+    const canSyncServer =
+      isOnline &&
+      session &&
+      (session.user.role === 'admin' || session.user.role === 'manager');
+
+    if (canSyncServer) {
+      try {
+        const updated = await apiRequest<AppSettings>('/api/settings', {
+          method: 'PUT',
+          body: JSON.stringify(persisted),
+        });
+        setSettingsState(updated);
+        notify('Settings saved and synced.', 'success');
+        return;
+      } catch (err) {
+        if (!(err instanceof TypeError)) {
+          throw err;
+        }
+        notify('Settings saved locally (offline).', 'info');
+        return;
+      }
+    }
+
+    notify('Preferences saved locally on this device.', 'success');
   };
 
   const submitTransaction = async (txn: Transaction) => {
@@ -752,6 +756,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     logout,
     refreshBootstrap,
     saveSettings,
+    setThemeMode,
+    setDensity,
+    updateBranding,
+    updateTokens,
+    resetSettingsToDefaults,
     submitTransaction,
     deleteHeldOrder,
     voidTransaction,
