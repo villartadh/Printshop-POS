@@ -57,12 +57,13 @@ export function getSuggestedRestockQuantity(
 }
 
 export function extractSupplierInfo(item: InventoryItem): InventorySupplierInfo {
-  if (item.supplierInfo && item.supplierInfo.name) {
+  const details = item.supplierDetails ?? item.supplierInfo;
+  if (details && details.name) {
     return {
-      name: item.supplierInfo.name,
-      contact: item.supplierInfo.contact ?? item.supplierContact ?? '',
-      supplierSku: item.supplierInfo.supplierSku ?? item.supplierSku ?? '',
-      leadTimeDays: item.supplierInfo.leadTimeDays ?? item.leadTimeDays ?? 0,
+      name: details.name,
+      contact: details.contact ?? item.supplierContact ?? '',
+      supplierSku: details.supplierSku ?? item.supplierSku ?? '',
+      leadTimeDays: details.leadTimeDays ?? item.leadTimeDays ?? 0,
     };
   }
   return {
@@ -180,11 +181,21 @@ export function normalizeInventoryItem(
   raw: Partial<InventoryItem> & { id: string },
 ): InventoryItem {
   const now = new Date().toISOString();
-  const reorderLevel = Math.max(0, Number(raw.reorderLevel) || 0);
-  const supplierName = (raw.supplier ?? raw.supplierInfo?.name ?? '').trim();
-  const supplierContact = (raw.supplierContact ?? raw.supplierInfo?.contact ?? '').trim();
-  const supplierSku = (raw.supplierSku ?? raw.supplierInfo?.supplierSku ?? '').trim();
-  const leadTimeDays = Math.max(0, Number(raw.leadTimeDays ?? raw.supplierInfo?.leadTimeDays) || 0);
+  const quantityOnHand = Math.max(0, Number(raw.quantityOnHand ?? raw.currentStock) || 0);
+  const reorderLevel = Math.max(0, Number(raw.reorderLevel ?? raw.reorderThreshold) || 0);
+  const details = raw.supplierDetails ?? raw.supplierInfo;
+  const supplierName = (raw.supplier ?? details?.name ?? '').trim();
+  const supplierContact = (raw.supplierContact ?? details?.contact ?? '').trim();
+  const supplierSku = (raw.supplierSku ?? details?.supplierSku ?? '').trim();
+  const leadTimeDays = Math.max(0, Number(raw.leadTimeDays ?? details?.leadTimeDays) || 0);
+  const supplierPayload = supplierName
+    ? {
+        name: supplierName,
+        contact: supplierContact,
+        supplierSku,
+        leadTimeDays,
+      }
+    : undefined;
 
   return {
     id: raw.id,
@@ -195,9 +206,11 @@ export function normalizeInventoryItem(
     category: (raw.category || 'Supplies').trim(),
     itemType: raw.itemType === 'finished_product' ? 'finished_product' : 'consumable',
     unit: (raw.unit || 'pc').trim(),
-    quantityOnHand: Math.max(0, Number(raw.quantityOnHand) || 0),
+    quantityOnHand,
+    currentStock: quantityOnHand,
     reservedQuantity: Math.max(0, Number(raw.reservedQuantity) || 0),
     reorderLevel,
+    reorderThreshold: reorderLevel,
     reorderQuantity:
       raw.reorderQuantity !== undefined
         ? Math.max(0, Number(raw.reorderQuantity) || 0)
@@ -207,15 +220,10 @@ export function normalizeInventoryItem(
     supplierContact,
     supplierSku,
     leadTimeDays,
-    supplierInfo: supplierName
-      ? {
-          name: supplierName,
-          contact: supplierContact,
-          supplierSku,
-          leadTimeDays,
-        }
-      : undefined,
+    supplierDetails: supplierPayload,
+    supplierInfo: supplierPayload,
     storageLocation: (raw.storageLocation || '').trim(),
+    sortOrder: raw.sortOrder !== undefined ? Number(raw.sortOrder) || 0 : undefined,
     lastRestockedAt: raw.lastRestockedAt ?? null,
     isDemo: Boolean(raw.isDemo),
     createdAt: raw.createdAt || raw.updatedAt || now,
@@ -264,10 +272,12 @@ export function validateInventoryItemInput(
   if (!input.unit || !input.unit.trim()) {
     return { valid: false, error: 'Stock unit (e.g., sheet, pc, sq ft) is required.' };
   }
-  if (input.quantityOnHand !== undefined && Number(input.quantityOnHand) < 0) {
+  const stockVal = input.quantityOnHand ?? input.currentStock;
+  if (stockVal !== undefined && Number(stockVal) < 0) {
     return { valid: false, error: 'Quantity on hand cannot be negative.' };
   }
-  if (input.reorderLevel !== undefined && Number(input.reorderLevel) < 0) {
+  const thresholdVal = input.reorderLevel ?? input.reorderThreshold;
+  if (thresholdVal !== undefined && Number(thresholdVal) < 0) {
     return { valid: false, error: 'Reorder level cannot be negative.' };
   }
   if (input.unitCost !== undefined && Number(input.unitCost) < 0) {

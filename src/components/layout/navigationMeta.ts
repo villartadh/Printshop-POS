@@ -47,9 +47,9 @@ export const MODULE_META: Record<ModuleId, ModuleMeta> = {
     icon: Tag,
   },
   inventory: {
-    label: 'Inventory',
+    label: 'Inventory Management',
     shortLabel: 'Stock',
-    description: 'Consumables, stock adjustments, and reorder alerts',
+    description: 'Consumables, stock counts, reorder levels, and movements',
     icon: Package,
   },
   customers: {

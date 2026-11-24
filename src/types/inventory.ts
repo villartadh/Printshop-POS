@@ -1,18 +1,40 @@
 export type InventoryItemType = 'consumable' | 'finished_product';
 export type StockStatus = 'in_stock' | 'low_stock' | 'out_of_stock';
+export type InventorySortField =
+  | 'name'
+  | 'sku'
+  | 'category'
+  | 'quantityOnHand'
+  | 'currentStock'
+  | 'reorderLevel'
+  | 'reorderThreshold'
+  | 'unitCost'
+  | 'status'
+  | 'sortOrder'
+  | 'updatedAt';
+export type InventorySortDirection = 'asc' | 'desc';
 
-export interface InventorySupplierInfo {
+export interface InventorySortConfig {
+  field: InventorySortField;
+  direction: InventorySortDirection;
+}
+
+export interface InventorySupplierDetails {
   name: string;
   contact?: string;
   supplierSku?: string;
   leadTimeDays?: number;
 }
 
+export type InventorySupplierInfo = InventorySupplierDetails;
+
 export interface SupplyCategory {
   id: string;
   name: string;
   description: string;
+  /** Default unit of measurement for items in this category (e.g., sheet, roll, bottle) */
   defaultUnit: string;
+  /** Display sort priority (lower numbers appear first) */
   sortOrder: number;
   isDemo?: boolean;
 }
@@ -25,13 +47,18 @@ export interface InventoryItem {
   categoryId?: string;
   category: string;
   itemType: InventoryItemType;
+  /** Unit of measurement (e.g., sheet, pc, sq ft, bottle, roll) */
   unit: string;
-  /** Physical stock currently in storage */
+  /** Current physical stock count on hand (canonical DB-mapped field) */
   quantityOnHand: number;
+  /** Alias for quantityOnHand representing current stock count */
+  currentStock?: number;
   /** Stock reserved/allocated to active print jobs */
   reservedQuantity?: number;
-  /** Threshold at or below which low-stock warning triggers */
+  /** Reorder threshold at or below which low-stock warning triggers (canonical DB-mapped field) */
   reorderLevel: number;
+  /** Alias for reorderLevel representing reorder threshold */
+  reorderThreshold?: number;
   /** Recommended restock quantity when ordering from supplier */
   reorderQuantity?: number;
   unitCost: number;
@@ -42,9 +69,13 @@ export interface InventoryItem {
   /** Supplier's own catalog SKU or part code */
   supplierSku?: string;
   leadTimeDays?: number;
-  /** Optional structured supplier object mirrored from flat supplier fields */
+  /** Structured supplier details mirrored from flat supplier fields */
+  supplierDetails?: InventorySupplierDetails;
+  /** Alias for supplierDetails for backward compatibility */
   supplierInfo?: InventorySupplierInfo;
   storageLocation?: string;
+  /** Display/catalog sort priority (lower numbers appear first) */
+  sortOrder?: number;
   lastRestockedAt?: string | null;
   isDemo?: boolean;
   createdAt?: string;
@@ -106,4 +137,6 @@ export interface InventoryStockFilter {
   categoryId?: string;
   stockStatus?: StockStatus | 'all';
   itemType?: InventoryItemType | 'all';
+  sortBy?: InventorySortField;
+  sortDir?: InventorySortDirection;
 }

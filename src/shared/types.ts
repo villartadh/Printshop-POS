@@ -381,7 +381,11 @@ export interface PrintJob {
 export type {
   InventoryItem,
   InventoryItemType,
+  InventorySortConfig,
+  InventorySortDirection,
+  InventorySortField,
   InventoryStockFilter,
+  InventorySupplierDetails,
   InventorySupplierInfo,
   StockAdjustmentPayload,
   StockMovement,

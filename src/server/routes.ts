@@ -54,11 +54,20 @@ function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
 }
 
 function mapInventoryItemRow(i: Record<string, unknown>): InventoryItem {
+  const quantityOnHand = Number(i.quantity_on_hand) || 0;
   const reorderLevel = Number(i.reorder_level) || 0;
   const supplier = String(i.supplier || '');
   const supplierContact = String(i.supplier_contact || '');
   const supplierSku = String(i.supplier_sku || '');
   const leadTimeDays = Number(i.lead_time_days) || 0;
+  const supplierPayload = supplier
+    ? {
+        name: supplier,
+        contact: supplierContact,
+        supplierSku,
+        leadTimeDays,
+      }
+    : undefined;
 
   return {
     id: String(i.id),
@@ -69,23 +78,19 @@ function mapInventoryItemRow(i: Record<string, unknown>): InventoryItem {
     category: String(i.category),
     itemType: i.item_type as InventoryItem['itemType'],
     unit: String(i.unit),
-    quantityOnHand: Number(i.quantity_on_hand) || 0,
+    quantityOnHand,
+    currentStock: quantityOnHand,
     reservedQuantity: Number(i.reserved_quantity) || 0,
     reorderLevel,
+    reorderThreshold: reorderLevel,
     reorderQuantity: Number(i.reorder_quantity) || Math.max(reorderLevel * 2, 0),
     unitCost: Number(i.unit_cost) || 0,
     supplier,
     supplierContact,
     supplierSku,
     leadTimeDays,
-    supplierInfo: supplier
-      ? {
-          name: supplier,
-          contact: supplierContact,
-          supplierSku,
-          leadTimeDays,
-        }
-      : undefined,
+    supplierDetails: supplierPayload,
+    supplierInfo: supplierPayload,
     storageLocation: String(i.storage_location || ''),
     lastRestockedAt: i.last_restocked_at ? String(i.last_restocked_at) : null,
     isDemo: i.is_demo === 1,
@@ -1266,8 +1271,8 @@ apiRouter.post(
     }
     const id = genId('inv');
     const now = new Date().toISOString();
-    const initialQty = Math.max(0, Number(i.quantityOnHand) || 0);
-    const reorderLevel = Math.max(0, Number(i.reorderLevel) || 0);
+    const initialQty = Math.max(0, Number(i.quantityOnHand ?? i.currentStock) || 0);
+    const reorderLevel = Math.max(0, Number(i.reorderLevel ?? i.reorderThreshold) || 0);
     const reorderQuantity =
       i.reorderQuantity !== undefined
         ? Math.max(0, Number(i.reorderQuantity) || 0)
@@ -1275,10 +1280,11 @@ apiRouter.post(
     const unitCost = Math.max(0, Number(i.unitCost) || 0);
     const itemName = i.name!.trim();
 
-    const supplierName = (i.supplier ?? i.supplierInfo?.name ?? '').trim();
-    const supplierContact = (i.supplierContact ?? i.supplierInfo?.contact ?? '').trim();
-    const supplierSku = (i.supplierSku ?? i.supplierInfo?.supplierSku ?? '').trim();
-    const leadTimeDays = Math.max(0, Number(i.leadTimeDays ?? i.supplierInfo?.leadTimeDays) || 0);
+    const supplierDetails = i.supplierDetails ?? i.supplierInfo;
+    const supplierName = (i.supplier ?? supplierDetails?.name ?? '').trim();
+    const supplierContact = (i.supplierContact ?? supplierDetails?.contact ?? '').trim();
+    const supplierSku = (i.supplierSku ?? supplierDetails?.supplierSku ?? '').trim();
+    const leadTimeDays = Math.max(0, Number(i.leadTimeDays ?? supplierDetails?.leadTimeDays) || 0);
 
     const run = db.transaction(() => {
       db.prepare(`
@@ -1354,30 +1360,33 @@ apiRouter.patch(
     const patch = req.body as Partial<InventoryItem>;
     const now = new Date().toISOString();
 
+    const patchDetails = patch.supplierDetails ?? patch.supplierInfo;
     const nextSupplier =
       patch.supplier !== undefined
         ? String(patch.supplier).trim()
-        : patch.supplierInfo?.name !== undefined
-          ? String(patch.supplierInfo.name).trim()
+        : patchDetails?.name !== undefined
+          ? String(patchDetails.name).trim()
           : String(existing.supplier || '');
     const nextSupplierContact =
       patch.supplierContact !== undefined
         ? String(patch.supplierContact).trim()
-        : patch.supplierInfo?.contact !== undefined
-          ? String(patch.supplierInfo.contact).trim()
+        : patchDetails?.contact !== undefined
+          ? String(patchDetails.contact).trim()
           : String(existing.supplier_contact || '');
     const nextSupplierSku =
       patch.supplierSku !== undefined
         ? String(patch.supplierSku).trim()
-        : patch.supplierInfo?.supplierSku !== undefined
-          ? String(patch.supplierInfo.supplierSku).trim()
+        : patchDetails?.supplierSku !== undefined
+          ? String(patchDetails.supplierSku).trim()
           : String(existing.supplier_sku || '');
     const nextLeadTime =
       patch.leadTimeDays !== undefined
         ? Math.max(0, Number(patch.leadTimeDays) || 0)
-        : patch.supplierInfo?.leadTimeDays !== undefined
-          ? Math.max(0, Number(patch.supplierInfo.leadTimeDays) || 0)
+        : patchDetails?.leadTimeDays !== undefined
+          ? Math.max(0, Number(patchDetails.leadTimeDays) || 0)
           : Number(existing.lead_time_days) || 0;
+
+    const patchReorder = patch.reorderLevel ?? patch.reorderThreshold;
 
     db.prepare(`
       UPDATE inventory_items
@@ -1401,8 +1410,8 @@ apiRouter.patch(
       patch.reservedQuantity !== undefined
         ? Math.max(0, Number(patch.reservedQuantity) || 0)
         : Number(existing.reserved_quantity) || 0,
-      patch.reorderLevel !== undefined
-        ? Math.max(0, Number(patch.reorderLevel) || 0)
+      patchReorder !== undefined
+        ? Math.max(0, Number(patchReorder) || 0)
         : Number(existing.reorder_level) || 0,
       patch.reorderQuantity !== undefined
         ? Math.max(0, Number(patch.reorderQuantity) || 0)

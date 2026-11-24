@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   ClipboardList,
+  Package,
   Receipt,
   Search,
   Tag,
@@ -15,7 +16,7 @@ import { MODULE_META } from './navigationMeta.ts';
 
 interface SearchEntry {
   id: string;
-  category: 'Module' | 'Service' | 'Print Job' | 'Customer' | 'Receipt';
+  category: 'Module' | 'Service' | 'Inventory' | 'Print Job' | 'Customer' | 'Receipt';
   title: string;
   subtitle: string;
   rightText?: string;
@@ -34,7 +35,7 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
   onNavigate,
 }) => {
   const { settings } = useAppState();
-  const { services, printJobs, customers, transactions } = useApp();
+  const { services, inventory, printJobs, customers, transactions } = useApp();
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -168,8 +169,26 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
       }
     }
 
+    for (const item of inventory) {
+      if (
+        item.name.toLowerCase().includes(q) ||
+        item.sku.toLowerCase().includes(q) ||
+        item.category.toLowerCase().includes(q) ||
+        (item.supplier || '').toLowerCase().includes(q)
+      ) {
+        list.push({
+          id: `inv-${item.id}`,
+          category: 'Inventory',
+          title: item.name,
+          subtitle: `${item.sku} · ${item.category} · Min ${item.reorderLevel} ${item.unit}`,
+          rightText: `${item.quantityOnHand} ${item.unit}`,
+          targetModule: 'inventory',
+        });
+      }
+    }
+
     return list.slice(0, 14);
-  }, [currency, customers, printJobs, query, services, settings.moduleOrder, transactions, visibleSet]);
+  }, [currency, customers, inventory, printJobs, query, services, settings.moduleOrder, transactions, visibleSet]);
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -205,6 +224,8 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
     switch (cat) {
       case 'Service':
         return <Tag className="w-4 h-4 text-[var(--pos-primary)]" />;
+      case 'Inventory':
+        return <Package className="w-4 h-4 text-[var(--pos-primary)]" />;
       case 'Print Job':
         return <ClipboardList className="w-4 h-4 text-[var(--pos-info)]" />;
       case 'Customer':

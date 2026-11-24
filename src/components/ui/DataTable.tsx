@@ -21,6 +21,8 @@ interface DataTableProps<T> {
   onSortChange?: (key: string) => void;
   emptyTitle?: string;
   emptyDescription?: string;
+  emptyActionLabel?: string;
+  onEmptyAction?: () => void;
 }
 
 export function DataTable<T>({
@@ -33,9 +35,18 @@ export function DataTable<T>({
   onSortChange,
   emptyTitle = 'No records found',
   emptyDescription = 'Adjust your filters or add a new entry to get started.',
+  emptyActionLabel,
+  onEmptyAction,
 }: DataTableProps<T>) {
   if (rows.length === 0) {
-    return <EmptyState title={emptyTitle} description={emptyDescription} />;
+    return (
+      <EmptyState
+        title={emptyTitle}
+        description={emptyDescription}
+        actionLabel={emptyActionLabel}
+        onAction={onEmptyAction}
+      />
+    );
   }
 
   return (
