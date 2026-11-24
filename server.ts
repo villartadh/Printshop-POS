@@ -26,9 +26,38 @@ async function startServer() {
   if (!isProd || !fs.existsSync(distPath)) {
     const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
+      plugins: hmrDisabled
+        ? [
+            {
+              name: 'disable-vite-client-ws-when-hmr-off',
+              enforce: 'post',
+              transform(code: string, id: string) {
+                if (
+                  id.endsWith('/dist/client/client.mjs') ||
+                  id.endsWith('\\dist\\client\\client.mjs')
+                ) {
+                  const startMarker = 'const transport = normalizeModuleRunnerTransport((() => {';
+                  const endMarker = 'let willUnload = false;';
+                  const startIdx = code.indexOf(startMarker);
+                  const endIdx = code.indexOf(endMarker);
+                  if (startIdx !== -1 && endIdx > startIdx) {
+                    const noopTransport =
+                      'const transport = normalizeModuleRunnerTransport({ connect() {}, disconnect() {}, send() {} });';
+                    return {
+                      code: code.slice(0, startIdx) + noopTransport + code.slice(endIdx),
+                      map: null,
+                    };
+                  }
+                }
+                return undefined;
+              },
+            },
+          ]
+        : [],
       server: {
         middlewareMode: true,
         hmr: hmrDisabled ? false : { server: httpServer },
+        ws: hmrDisabled ? false : { server: httpServer },
         watch: hmrDisabled ? null : undefined,
       },
       appType: 'spa',

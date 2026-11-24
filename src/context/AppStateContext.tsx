@@ -57,6 +57,12 @@ export function mergeSettingsWithDefaults(
         : DEFAULT_SETTINGS.defaultLandingModule,
     moduleOrder: incomingOrder,
     hiddenModules,
+    shellPreferences: {
+      sidebarCollapsed:
+        typeof raw.shellPreferences?.sidebarCollapsed === 'boolean'
+          ? raw.shellPreferences.sidebarCollapsed
+          : Boolean(DEFAULT_SETTINGS.shellPreferences?.sidebarCollapsed),
+    },
     tokens: {
       ...DEFAULT_SETTINGS.tokens,
       ...(raw.tokens && typeof raw.tokens === 'object' ? raw.tokens : {}),
@@ -172,6 +178,7 @@ export interface AppStateContextValue {
   updateTokens: (patch: Partial<DesignTokens>) => AppSettings;
   setThemeMode: (mode: ThemeMode) => AppSettings;
   setDensity: (density: InterfaceDensity) => AppSettings;
+  setSidebarCollapsed: (collapsed: boolean) => AppSettings;
   resetSettingsToDefaults: () => AppSettings;
 }
 
@@ -312,6 +319,19 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     [setSettingsState],
   );
 
+  const setSidebarCollapsed = useCallback(
+    (sidebarCollapsed: boolean) =>
+      setSettingsState((prev) => ({
+        ...prev,
+        shellPreferences: {
+          ...prev.shellPreferences,
+          sidebarCollapsed,
+        },
+        updatedAt: new Date().toISOString(),
+      })),
+    [setSettingsState],
+  );
+
   const resetSettingsToDefaults = useCallback(() => {
     const defaults = mergeSettingsWithDefaults({
       ...DEFAULT_SETTINGS,
@@ -330,6 +350,7 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updateTokens,
       setThemeMode,
       setDensity,
+      setSidebarCollapsed,
       resetSettingsToDefaults,
     }),
     [
@@ -341,6 +362,7 @@ export const AppStateProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       updateTokens,
       setThemeMode,
       setDensity,
+      setSidebarCollapsed,
       resetSettingsToDefaults,
     ],
   );

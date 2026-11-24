@@ -135,12 +135,17 @@ export interface TaxAndCurrencyConfig {
   roundingMode: 'none' | 'nearest_0_25' | 'nearest_1';
 }
 
+export interface ShellPreferences {
+  sidebarCollapsed: boolean;
+}
+
 export interface AppSettings {
   themeMode: ThemeMode;
   density: InterfaceDensity;
   defaultLandingModule: ModuleId;
   moduleOrder: ModuleId[];
   hiddenModules: ModuleId[];
+  shellPreferences?: ShellPreferences;
   tokens: DesignTokens;
   branding: BrandingConfig;
   posLayout: PosLayoutConfig;

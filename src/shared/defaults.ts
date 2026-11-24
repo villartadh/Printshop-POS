@@ -29,6 +29,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultLandingModule: 'pos',
   moduleOrder: DEFAULT_MODULE_ORDER,
   hiddenModules: [],
+  shellPreferences: {
+    sidebarCollapsed: false,
+  },
   tokens: {
     primary: '#0D9488',
     primaryHover: '#0F766E',

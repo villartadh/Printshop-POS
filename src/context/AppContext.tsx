@@ -127,6 +127,7 @@ interface AppContextValue {
   saveSettings: (next: AppSettings) => Promise<void>;
   setThemeMode: (mode: ThemeMode) => void;
   setDensity: (density: InterfaceDensity) => void;
+  setSidebarCollapsed: (collapsed: boolean) => void;
   updateBranding: (patch: Partial<BrandingConfig>) => void;
   updateTokens: (patch: Partial<DesignTokens>) => void;
   resetSettingsToDefaults: () => void;
@@ -188,6 +189,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updateTokens,
     setThemeMode,
     setDensity,
+    setSidebarCollapsed,
     resetSettingsToDefaults,
   } = useAppState();
 
@@ -238,7 +240,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const serverTs = Date.parse(data.settings?.updatedAt || '') || 0;
       const localTs = Date.parse(settings.updatedAt || '') || 0;
       if (!hasLocalCustomizations || serverTs > localTs) {
-        setSettingsState(data.settings);
+        setSettingsState((prev) => ({
+          ...data.settings,
+          shellPreferences: data.settings.shellPreferences ?? prev.shellPreferences,
+        }));
       }
       setCategories(data.categories);
       setServices(data.services);
@@ -758,6 +763,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveSettings,
     setThemeMode,
     setDensity,
+    setSidebarCollapsed,
     updateBranding,
     updateTokens,
     resetSettingsToDefaults,
