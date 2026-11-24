@@ -181,6 +181,7 @@ interface AppContextValue {
   loadInventory: () => Promise<InventoryItem[]>;
   createInventoryItem: (item: Partial<InventoryItem>) => Promise<InventoryItem>;
   updateInventoryItem: (id: string, patch: Partial<InventoryItem>) => Promise<InventoryItem>;
+  deleteInventoryItem: (id: string) => Promise<void>;
   trackStockChange: (id: string, payload: StockAdjustmentPayload) => Promise<StockMovement>;
   adjustInventory: (
     id: string,
@@ -729,6 +730,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return normalized;
   };
 
+  const deleteInventoryItem = async (id: string): Promise<void> => {
+    const target = inventory.find((item) => item.id === id);
+    await apiRequest<{ ok: boolean; id: string }>(`/api/inventory/${id}`, {
+      method: 'DELETE',
+    });
+
+    const nextItems = inventory.filter((item) => item.id !== id);
+    const nextMovements = stockMovements.filter((mov) => mov.inventoryItemId !== id);
+    setInventory(nextItems);
+    setStockMovements(nextMovements);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        inventory: nextItems,
+        stockMovements: nextMovements,
+      });
+    }
+
+    notify(
+      target ? `Deleted "${target.name}" from inventory.` : 'Inventory item deleted.',
+      'info',
+    );
+  };
+
   const trackStockChange = async (
     id: string,
     payload: StockAdjustmentPayload,
@@ -1030,6 +1057,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     loadInventory,
     createInventoryItem,
     updateInventoryItem,
+    deleteInventoryItem,
     trackStockChange,
     adjustInventory,
     getInventoryItemById,

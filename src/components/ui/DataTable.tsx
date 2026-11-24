@@ -23,6 +23,7 @@ interface DataTableProps<T> {
   emptyDescription?: string;
   emptyActionLabel?: string;
   onEmptyAction?: () => void;
+  rowClassName?: (row: T) => string;
 }
 
 export function DataTable<T>({
@@ -37,6 +38,7 @@ export function DataTable<T>({
   emptyDescription = 'Adjust your filters or add a new entry to get started.',
   emptyActionLabel,
   onEmptyAction,
+  rowClassName,
 }: DataTableProps<T>) {
   if (rows.length === 0) {
     return (
@@ -86,16 +88,19 @@ export function DataTable<T>({
           </tr>
         </thead>
         <tbody className="divide-y divide-[var(--pos-border)]">
-          {rows.map((row) => (
-            <tr
-              key={rowKey(row)}
-              onClick={onRowClick ? () => onRowClick(row) : undefined}
-              className={`text-sm text-[var(--pos-text)] ${
-                onRowClick
-                  ? 'hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors'
-                  : ''
-              }`}
-            >
+          {rows.map((row) => {
+            const customRowCls = rowClassName ? rowClassName(row) : '';
+            const hoverCls = customRowCls
+              ? 'cursor-pointer transition-colors'
+              : 'hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors';
+            return (
+              <tr
+                key={rowKey(row)}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                className={`text-sm text-[var(--pos-text)] ${
+                  onRowClick ? hoverCls : 'transition-colors'
+                } ${customRowCls}`}
+              >
               {columns.map((col) => (
                 <td
                   key={col.key}
@@ -106,8 +111,9 @@ export function DataTable<T>({
                   {col.render(row)}
                 </td>
               ))}
-            </tr>
-          ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

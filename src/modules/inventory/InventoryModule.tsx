@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowUpDown, Edit2, Plus, RefreshCw, Search, X } from 'lucide-react';
+import { AlertTriangle, ArrowUpDown, Edit2, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import {
@@ -19,12 +19,13 @@ import type {
   StockStatus,
 } from '../../types/inventory.ts';
 import { Button, Card, Input, Select, StatusIndicator } from '../../components/ui/Primitives.tsx';
-import { DataTable, type DataTableColumn } from '../../components/ui/DataTable.tsx';
+import { DataTable } from '../../components/ui/DataTable.tsx';
 import { LoadingState, Modal } from '../../components/ui/Overlays.tsx';
 import {
   InventoryItemDialog,
   type InventoryItemFormValues,
 } from '../../components/inventory/InventoryItemDialog.tsx';
+import { InventoryTable } from '../../components/inventory/InventoryTable.tsx';
 
 type InventoryTab = 'items' | 'low_stock' | 'movements';
 type InventorySortKey = Extract<
@@ -46,6 +47,7 @@ export const InventoryModule: React.FC = () => {
     loadInventory,
     createInventoryItem,
     updateInventoryItem,
+    deleteInventoryItem,
     trackStockChange,
     getInventoryItemById,
     getItemStockMovements,
@@ -80,8 +82,10 @@ export const InventoryModule: React.FC = () => {
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [adjustTarget, setAdjustTarget] = useState<InventoryItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<InventoryItem | null>(null);
   const [detailItemId, setDetailItemId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Stock adjustment form
   const [movementType, setMovementType] = useState<StockMovementType>('purchase');
@@ -265,188 +269,22 @@ export const InventoryModule: React.FC = () => {
     }
   };
 
-  const inventoryColumns: DataTableColumn<InventoryItem>[] = [
-    {
-      key: 'name',
-      label: 'Item & SKU',
-      sortable: true,
-      render: (item) => (
-        <div className="min-w-[180px]">
-          <div className="text-sm font-semibold text-[var(--pos-text)] leading-snug">
-            {item.name}
-          </div>
-          <div className="text-[11px] text-[var(--pos-text-muted)] mt-0.5 flex flex-wrap items-center gap-1">
-            <span className="font-mono-num">{item.sku}</span>
-            <span aria-hidden="true">·</span>
-            <span>{item.category}</span>
-            <span aria-hidden="true">·</span>
-            <span>{item.itemType === 'finished_product' ? 'Finished' : 'Consumable'}</span>
-            {item.storageLocation && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span>{item.storageLocation}</span>
-              </>
-            )}
-          </div>
-        </div>
-      ),
-    },
-    {
-      key: 'supplier',
-      label: 'Supplier',
-      hideOnMobile: true,
-      render: (item) => {
-        const sup = extractSupplierInfo(item);
-        return (
-          <div className="min-w-[130px]">
-            <div className="text-xs font-medium text-[var(--pos-text)]">
-              {sup.name || 'Unassigned'}
-            </div>
-            {(sup.contact || sup.supplierSku) && (
-              <div className="text-[11px] text-[var(--pos-text-muted)] mt-0.5">
-                {[sup.supplierSku, sup.contact].filter(Boolean).join(' · ')}
-              </div>
-            )}
-          </div>
-        );
-      },
-    },
-    {
-      key: 'quantityOnHand',
-      label: 'Current Stock',
-      align: 'right',
-      sortable: true,
-      render: (item) => {
-        const status = getInventoryStockStatus(item);
-        const avail = getAvailableStock(item);
-        const scaleMax = Math.max(item.reorderLevel * 2, item.quantityOnHand, 1);
-        const pct = Math.min(100, Math.max(0, Math.round((item.quantityOnHand / scaleMax) * 100)));
-        const meterColor =
-          status === 'out_of_stock'
-            ? 'bg-[var(--pos-error)]'
-            : status === 'low_stock'
-              ? 'bg-[var(--pos-warning)]'
-              : 'bg-[var(--pos-success)]';
-
-        return (
-          <div className="inline-flex flex-col items-end min-w-[96px]">
-            <div
-              className={`font-mono-num font-semibold text-sm ${
-                status === 'out_of_stock'
-                  ? 'text-[var(--pos-error)]'
-                  : status === 'low_stock'
-                    ? 'text-[var(--pos-warning)]'
-                    : 'text-[var(--pos-text)]'
-              }`}
-            >
-              {item.quantityOnHand} {item.unit}
-            </div>
-            <div className="w-20 h-1 rounded-full bg-[var(--pos-border)] overflow-hidden mt-1">
-              <div className={`h-full rounded-full ${meterColor}`} style={{ width: `${pct}%` }} />
-            </div>
-            {(item.reservedQuantity || 0) > 0 && (
-              <div className="text-[11px] text-[var(--pos-text-muted)] font-mono-num mt-0.5">
-                Avail {avail}
-              </div>
-            )}
-          </div>
-        );
-      },
-    },
-    {
-      key: 'reorderLevel',
-      label: 'Reorder Level',
-      align: 'right',
-      sortable: true,
-      render: (item) => {
-        const suggested = getSuggestedRestockQuantity(item);
-        return (
-          <div className="inline-flex flex-col items-end">
-            <div className="font-mono-num text-sm font-medium text-[var(--pos-text)]">
-              {item.reorderLevel} {item.unit}
-            </div>
-            <div className="text-[11px] text-[var(--pos-text-muted)] font-mono-num mt-0.5">
-              {suggested > 0
-                ? `Restock +${suggested}`
-                : item.reorderQuantity
-                  ? `Order ${item.reorderQuantity}`
-                  : 'Threshold'}
-            </div>
-          </div>
-        );
-      },
-    },
-    {
-      key: 'unitCost',
-      label: 'Unit Cost',
-      align: 'right',
-      hideOnMobile: true,
-      sortable: true,
-      render: (item) => (
-        <span className="font-mono-num text-sm text-[var(--pos-text)]">
-          {formatCurrency(item.unitCost, taxCurr)}
-        </span>
-      ),
-    },
-    {
-      key: 'status',
-      label: 'Status',
-      sortable: true,
-      render: (item) => {
-        const status = getInventoryStockStatus(item);
-        return (
-          <StatusIndicator
-            tone={
-              status === 'out_of_stock'
-                ? 'error'
-                : status === 'low_stock'
-                  ? 'warning'
-                  : 'success'
-            }
-            label={
-              status === 'out_of_stock'
-                ? 'Out of Stock'
-                : status === 'low_stock'
-                  ? 'Low Stock'
-                  : 'In Stock'
-            }
-          />
-        );
-      },
-    },
-    {
-      key: 'action',
-      label: 'Actions',
-      align: 'right',
-      render: (item) => (
-        <div
-          className="inline-flex items-center justify-end gap-1.5"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {canEditCatalog && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => openEditItemModal(item)}
-              title={`Edit ${item.name}`}
-              aria-label={`Edit ${item.name}`}
-            >
-              <Edit2 className="w-3.5 h-3.5" />
-            </Button>
-          )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => openAdjustModal(item)}
-            aria-label={`Adjust stock for ${item.name}`}
-          >
-            <ArrowUpDown className="w-3.5 h-3.5" />
-            Stock
-          </Button>
-        </div>
-      ),
-    },
-  ];
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const removedId = deleteTarget.id;
+      await deleteInventoryItem(removedId);
+      if (detailItemId === removedId) {
+        setDetailItemId(null);
+      }
+      setDeleteTarget(null);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to delete inventory item.', 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -538,142 +376,80 @@ export const InventoryModule: React.FC = () => {
         </Card>
       </div>
 
-      {/* View Switcher & Search / Filter Toolbar */}
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div
-            role="tablist"
-            aria-label="Inventory views"
-            style={{ borderRadius: 'var(--pos-radius)' }}
-            className="inline-flex items-center gap-1 p-1 bg-[var(--pos-bg)] border border-[var(--pos-border)]"
+      {/* View Switcher */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div
+          role="tablist"
+          aria-label="Inventory views"
+          style={{ borderRadius: 'var(--pos-radius)' }}
+          className="inline-flex items-center gap-1 p-1 bg-[var(--pos-bg)] border border-[var(--pos-border)]"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'items'}
+            onClick={() => setTab('items')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+              tab === 'items'
+                ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
+                : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+            }`}
           >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === 'items'}
-              onClick={() => setTab('items')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
-                tab === 'items'
-                  ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
-                  : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
-              }`}
-            >
-              All Inventory ({inventory.length})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === 'low_stock'}
-              onClick={() => setTab('low_stock')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
-                tab === 'low_stock'
-                  ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
-                  : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
-              }`}
-            >
-              Reorder Alerts ({lowStock.length})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === 'movements'}
-              onClick={() => setTab('movements')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
-                tab === 'movements'
-                  ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
-                  : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
-              }`}
-            >
-              Stock Movements ({stockMovements.length})
-            </button>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
-            <div className="relative flex-1 sm:flex-initial sm:w-64">
-              <Input
-                aria-label="Search inventory items"
-                leftIcon={<Search className="w-3.5 h-3.5" />}
-                placeholder={
-                  tab === 'movements'
-                    ? 'Search material, ref, staff...'
-                    : 'Search name, SKU, supplier, rack...'
-                }
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className={search ? 'pr-8' : ''}
-              />
-              {search && (
-                <button
-                  type="button"
-                  onClick={() => setSearch('')}
-                  aria-label="Clear search"
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] cursor-pointer p-0.5"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {tab !== 'movements' && (
-              <>
-                <div className="w-full sm:w-44">
-                  <Select
-                    aria-label="Filter by supply category"
-                    value={categoryFilter}
-                    onChange={(e) => setCategoryFilter(e.target.value)}
-                    options={[
-                      { value: 'all', label: 'All Categories' },
-                      ...supplyCategories.map((sc) => ({
-                        value: sc.id,
-                        label: sc.name,
-                      })),
-                    ]}
-                  />
-                </div>
-                {tab === 'items' && (
-                  <div className="w-1/2 sm:w-36 flex-1 sm:flex-initial">
-                    <Select
-                      aria-label="Filter by stock status"
-                      value={statusFilter}
-                      onChange={(e) => setStatusFilter(e.target.value as StockStatus | 'all')}
-                      options={[
-                        { value: 'all', label: 'All Statuses' },
-                        { value: 'in_stock', label: 'In Stock' },
-                        { value: 'low_stock', label: 'Low Stock' },
-                        { value: 'out_of_stock', label: 'Out of Stock' },
-                      ]}
-                    />
-                  </div>
-                )}
-                <div className="w-1/2 sm:w-36 flex-1 sm:flex-initial">
-                  <Select
-                    aria-label="Filter by item type"
-                    value={typeFilter}
-                    onChange={(e) => setTypeFilter(e.target.value as InventoryItemType | 'all')}
-                    options={[
-                      { value: 'all', label: 'All Types' },
-                      { value: 'consumable', label: 'Consumables' },
-                      { value: 'finished_product', label: 'Finished Goods' },
-                    ]}
-                  />
-                </div>
-                {hasActiveFilters && (
-                  <Button variant="ghost" size="sm" onClick={clearFilters}>
-                    Reset
-                  </Button>
-                )}
-              </>
-            )}
-          </div>
+            All Inventory ({inventory.length})
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'low_stock'}
+            onClick={() => setTab('low_stock')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+              tab === 'low_stock'
+                ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
+                : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+            }`}
+          >
+            Reorder Alerts ({lowStock.length})
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'movements'}
+            onClick={() => setTab('movements')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+              tab === 'movements'
+                ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
+                : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+            }`}
+          >
+            Stock Movements ({stockMovements.length})
+          </button>
         </div>
 
-        {tab !== 'movements' && (
-          <div className="flex items-center justify-between text-xs text-[var(--pos-text-muted)]">
-            <span className="font-mono-num">
-              Showing {visibleItems.length} of {tab === 'low_stock' ? lowStock.length : inventory.length} item(s)
-            </span>
-            <span>Click any row to inspect supplier details & movement history</span>
+        {tab === 'movements' ? (
+          <div className="relative w-full sm:w-64">
+            <Input
+              aria-label="Search stock movements"
+              leftIcon={<Search className="w-3.5 h-3.5" />}
+              placeholder="Search material, ref, staff..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className={search ? 'pr-8' : ''}
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] cursor-pointer p-0.5"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
+        ) : (
+          <span className="text-xs text-[var(--pos-text-muted)]">
+            Click any row to inspect supplier details & movement history
+          </span>
         )}
       </div>
 
@@ -751,14 +527,59 @@ export const InventoryModule: React.FC = () => {
           ]}
         />
       ) : (
-        <DataTable
-          rows={visibleItems}
-          rowKey={(i) => i.id}
-          columns={inventoryColumns}
+        <InventoryTable
+          items={visibleItems}
+          supplyCategories={supplyCategories}
+          taxAndCurrency={taxCurr}
+          canEdit={canEditCatalog}
+          onEdit={openEditItemModal}
+          onDelete={(item) => setDeleteTarget(item)}
+          onAdjustStock={openAdjustModal}
+          onRowClick={(item) => setDetailItemId(item.id)}
           sortKey={sortKey}
           sortDir={sortDir}
           onSortChange={handleSortChange}
-          onRowClick={(item) => setDetailItemId(item.id)}
+          searchQuery={search}
+          onSearchChange={setSearch}
+          categoryFilter={categoryFilter}
+          onCategoryChange={setCategoryFilter}
+          totalCount={tab === 'low_stock' ? lowStock.length : inventory.length}
+          toolbarExtras={
+            <>
+              {tab === 'items' && (
+                <div className="w-1/2 sm:w-36 flex-1 sm:flex-initial">
+                  <Select
+                    aria-label="Filter by stock status"
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value as StockStatus | 'all')}
+                    options={[
+                      { value: 'all', label: 'All Statuses' },
+                      { value: 'in_stock', label: 'In Stock' },
+                      { value: 'low_stock', label: 'Low Stock' },
+                      { value: 'out_of_stock', label: 'Out of Stock' },
+                    ]}
+                  />
+                </div>
+              )}
+              <div className="w-1/2 sm:w-36 flex-1 sm:flex-initial">
+                <Select
+                  aria-label="Filter by item type"
+                  value={typeFilter}
+                  onChange={(e) => setTypeFilter(e.target.value as InventoryItemType | 'all')}
+                  options={[
+                    { value: 'all', label: 'All Types' },
+                    { value: 'consumable', label: 'Consumables' },
+                    { value: 'finished_product', label: 'Finished Goods' },
+                  ]}
+                />
+              </div>
+              {hasActiveFilters && (
+                <Button variant="ghost" size="sm" onClick={clearFilters}>
+                  Reset
+                </Button>
+              )}
+            </>
+          }
           emptyTitle={
             hasActiveFilters
               ? 'No inventory items match your search'
@@ -1077,6 +898,64 @@ export const InventoryModule: React.FC = () => {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Delete Confirmation Dialog */}
+      <Modal
+        open={Boolean(deleteTarget)}
+        onClose={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        title="Delete Inventory Item"
+        subtitle={
+          deleteTarget ? `${deleteTarget.name} · ${deleteTarget.sku}` : ''
+        }
+        maxWidth="sm"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              type="button"
+              disabled={deleting}
+              onClick={() => setDeleteTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              type="button"
+              loading={deleting}
+              onClick={() => void handleConfirmDelete()}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Item
+            </Button>
+          </>
+        }
+      >
+        {deleteTarget && (
+          <div className="space-y-3 text-sm text-[var(--pos-text)]">
+            <p>
+              Are you sure you want to permanently remove{' '}
+              <strong className="font-semibold">{deleteTarget.name}</strong> from inventory?
+            </p>
+            {(deleteTarget.currentStock ?? deleteTarget.quantityOnHand) > 0 && (
+              <div
+                style={{ borderRadius: 'var(--pos-radius)' }}
+                className="flex items-start gap-2.5 p-3 text-xs border border-[var(--pos-warning)]/35 bg-[var(--pos-warning)]/10 text-[var(--pos-text)]"
+              >
+                <AlertTriangle className="w-4 h-4 text-[var(--pos-warning)] shrink-0 mt-0.5" />
+                <span>
+                  This item currently has{' '}
+                  <strong className="font-mono-num">
+                    {deleteTarget.currentStock ?? deleteTarget.quantityOnHand} {deleteTarget.unit}
+                  </strong>{' '}
+                  on hand. Deleting it will also remove its associated stock movement history.
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
     </div>
   );

@@ -1435,6 +1435,37 @@ apiRouter.patch(
   },
 );
 
+apiRouter.delete(
+  '/inventory/:id',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const id = String(req.params.id);
+    const existing = db.prepare('SELECT id, name, sku, quantity_on_hand FROM inventory_items WHERE id = ?').get(id) as
+      | { id: string; name: string; sku: string; quantity_on_hand: number }
+      | undefined;
+    if (!existing) {
+      return res.status(404).json({ error: 'Inventory item not found.' });
+    }
+
+    const run = db.transaction(() => {
+      db.prepare('DELETE FROM stock_movements WHERE inventory_item_id = ?').run(id);
+      db.prepare('DELETE FROM inventory_items WHERE id = ?').run(id);
+      writeAuditLog(
+        req.authUser!.id,
+        req.authUser!.fullName,
+        'INVENTORY_ITEM_DELETED',
+        'inventory_item',
+        id,
+        `Deleted inventory item ${existing.name} (${existing.sku}) with stock ${existing.quantity_on_hand}`,
+      );
+    });
+    run();
+
+    res.json({ ok: true, id });
+  },
+);
+
 function applyInventoryAdjustment(
   id: string,
   payload: {
