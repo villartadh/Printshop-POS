@@ -1,0 +1,779 @@
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { DEFAULT_SETTINGS } from '../shared/defaults.ts';
+import type {
+  AppSettings,
+  AuditLogEntry,
+  AuthSession,
+  CashierShift,
+  Customer,
+  ExpenseRecord,
+  InventoryItem,
+  ModuleId,
+  OfflineMutation,
+  PlatformPreviewMode,
+  PrintJob,
+  PrintService,
+  ServiceCategory,
+  StockMovement,
+  Transaction,
+  UserAccount,
+} from '../shared/types.ts';
+import { apiRequest, getDeviceDescriptor, setMemoryToken } from '../services/apiClient.ts';
+import {
+  appendDiagnosticLog,
+  enqueueOfflineMutation,
+  getOutboxMutations,
+  loadOfflineSnapshot,
+  removeOutboxMutation,
+  saveOfflineSnapshot,
+  updateOutboxMutation,
+} from '../services/offlineDb.ts';
+import { useOnlineStatus } from '../hooks/usePWAInstall.ts';
+
+export interface QuickUserInfo {
+  id: string;
+  username: string;
+  fullName: string;
+  role: UserAccount['role'];
+  hasPin: boolean;
+}
+
+export interface ToastMessage {
+  id: string;
+  tone: 'success' | 'error' | 'info';
+  text: string;
+}
+
+interface BootstrapPayload {
+  settings: AppSettings;
+  categories: ServiceCategory[];
+  services: PrintService[];
+  inventory: InventoryItem[];
+  stockMovements: StockMovement[];
+  customers: Customer[];
+  transactions: Transaction[];
+  printJobs: PrintJob[];
+  expenses: ExpenseRecord[];
+  shifts: CashierShift[];
+  users: UserAccount[];
+  auditLogs: AuditLogEntry[];
+  serverTime: string;
+}
+
+interface AppContextValue {
+  // Auth & shell
+  authChecked: boolean;
+  needsSetup: boolean;
+  quickUsers: QuickUserInfo[];
+  session: AuthSession | null;
+  isLocked: boolean;
+  setIsLocked: (locked: boolean) => void;
+  activeModule: ModuleId;
+  setActiveModule: (mod: ModuleId) => void;
+  platformPreview: PlatformPreviewMode;
+  setPlatformPreview: (mode: PlatformPreviewMode) => void;
+  fullScreenCashier: boolean;
+  setFullScreenCashier: (val: boolean) => void;
+
+  // Connectivity & Sync
+  isOnline: boolean;
+  isSyncing: boolean;
+  pendingSyncCount: number;
+  lastSyncedAt: string | null;
+  outbox: OfflineMutation[];
+  syncNow: () => Promise<void>;
+
+  // Data stores
+  loadingData: boolean;
+  dataError: string | null;
+  settings: AppSettings;
+  categories: ServiceCategory[];
+  services: PrintService[];
+  inventory: InventoryItem[];
+  stockMovements: StockMovement[];
+  customers: Customer[];
+  transactions: Transaction[];
+  printJobs: PrintJob[];
+  expenses: ExpenseRecord[];
+  shifts: CashierShift[];
+  activeShift: CashierShift | null;
+  users: UserAccount[];
+  auditLogs: AuditLogEntry[];
+
+  // Toasts
+  toasts: ToastMessage[];
+  notify: (text: string, tone?: ToastMessage['tone']) => void;
+  dismissToast: (id: string) => void;
+
+  // Auth Actions
+  refreshAuthStatus: () => Promise<void>;
+  setupAdmin: (payload: {
+    username: string;
+    fullName: string;
+    email: string;
+    password: string;
+    pin: string;
+  }) => Promise<void>;
+  loginWithPassword: (username: string, password: string) => Promise<void>;
+  loginWithPin: (userId: string, pin: string) => Promise<void>;
+  logout: () => Promise<void>;
+
+  // Domain Actions
+  refreshBootstrap: () => Promise<void>;
+  saveSettings: (next: AppSettings) => Promise<void>;
+  submitTransaction: (txn: Transaction) => Promise<{ transaction: Transaction; queuedOffline: boolean }>;
+  deleteHeldOrder: (id: string) => Promise<void>;
+  voidTransaction: (id: string, reason: string) => Promise<void>;
+  refundTransaction: (id: string, reason: string) => Promise<void>;
+  createCategory: (name: string) => Promise<void>;
+  deleteCategory: (id: string) => Promise<void>;
+  saveService: (service: Partial<PrintService> & { id?: string }) => Promise<PrintService>;
+  deleteService: (id: string) => Promise<void>;
+  createPrintJob: (job: Partial<PrintJob>) => Promise<PrintJob>;
+  updatePrintJob: (
+    id: string,
+    patch: {
+      productionStatus?: PrintJob['productionStatus'];
+      paymentStatus?: PrintJob['paymentStatus'];
+      assignedOperator?: string;
+      instructions?: string;
+      depositAmount?: number;
+      note?: string;
+    },
+  ) => Promise<void>;
+  createInventoryItem: (item: Partial<InventoryItem>) => Promise<void>;
+  adjustInventory: (
+    id: string,
+    payload: {
+      movementType: StockMovement['movementType'];
+      quantityDelta: number;
+      note: string;
+      reference?: string;
+    },
+  ) => Promise<void>;
+  createCustomer: (customer: Partial<Customer>) => Promise<Customer>;
+  collectCustomerBalance: (id: string, amount: number) => Promise<void>;
+  createExpense: (expense: Partial<ExpenseRecord>) => Promise<void>;
+  deleteExpense: (id: string) => Promise<void>;
+  startShift: (openingCash: number) => Promise<void>;
+  recordCashMovement: (shiftId: string, type: 'cash_in' | 'cash_out', amount: number, reason: string) => Promise<void>;
+  closeShift: (shiftId: string, actualCash: number, reconciliationNote: string) => Promise<void>;
+  seedDemo: () => Promise<void>;
+  clearDemo: () => Promise<void>;
+}
+
+const AppContext = createContext<AppContextValue | null>(null);
+
+export function useApp() {
+  const ctx = useContext(AppContext);
+  if (!ctx) throw new Error('useApp must be used inside AppProvider');
+  return ctx;
+}
+
+export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const isOnline = useOnlineStatus();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [quickUsers, setQuickUsers] = useState<QuickUserInfo[]>([]);
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [isLocked, setIsLocked] = useState(false);
+
+  const [activeModule, setActiveModule] = useState<ModuleId>('pos');
+  const [platformPreview, setPlatformPreview] = useState<PlatformPreviewMode>('auto');
+  const [fullScreenCashier, setFullScreenCashier] = useState(false);
+
+  const [loadingData, setLoadingData] = useState(false);
+  const [dataError, setDataError] = useState<string | null>(null);
+
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [categories, setCategories] = useState<ServiceCategory[]>([]);
+  const [services, setServices] = useState<PrintService[]>([]);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [printJobs, setPrintJobs] = useState<PrintJob[]>([]);
+  const [expenses, setExpenses] = useState<ExpenseRecord[]>([]);
+  const [shifts, setShifts] = useState<CashierShift[]>([]);
+  const [users, setUsers] = useState<UserAccount[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+
+  const [outbox, setOutbox] = useState<OfflineMutation[]>([]);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const notify = useCallback((text: string, tone: ToastMessage['tone'] = 'info') => {
+    const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    setToasts((prev) => [...prev.slice(-3), { id, tone, text }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3600);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Apply design tokens, theme, density, and font dynamically to :root
+  useEffect(() => {
+    const root = document.documentElement;
+    const { tokens, themeMode, density, branding } = settings;
+
+    const prefersDark =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+    const shouldBeDark = themeMode === 'dark' || (themeMode === 'system' && prefersDark);
+
+    root.classList.toggle('dark', shouldBeDark);
+    root.setAttribute('data-density', density);
+
+    root.style.setProperty('--pos-primary', tokens.primary);
+    root.style.setProperty('--pos-primary-hover', tokens.primaryHover);
+    root.style.setProperty('--pos-nav-bg', tokens.navBackground);
+    root.style.setProperty('--pos-success', tokens.success);
+    root.style.setProperty('--pos-warning', tokens.warning);
+    root.style.setProperty('--pos-error', tokens.error);
+    root.style.setProperty('--pos-info', tokens.info);
+    root.style.setProperty('--pos-radius', `${tokens.borderRadiusPx}px`);
+    root.style.setProperty('--pos-scale', String(tokens.fontSizeScale || 1));
+    root.style.setProperty(
+      '--pos-font',
+      `"${tokens.fontFamily}", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`,
+    );
+
+    if (!shouldBeDark) {
+      root.style.setProperty('--pos-bg', tokens.appBackground);
+      root.style.setProperty('--pos-surface', tokens.surface);
+      root.style.setProperty('--pos-text', tokens.primaryText);
+      root.style.setProperty('--pos-text-muted', tokens.secondaryText);
+      root.style.setProperty('--pos-border', tokens.border);
+    } else {
+      root.style.removeProperty('--pos-bg');
+      root.style.removeProperty('--pos-surface');
+      root.style.removeProperty('--pos-text');
+      root.style.removeProperty('--pos-text-muted');
+      root.style.removeProperty('--pos-border');
+    }
+
+    document.title = `${branding.appName || 'Printshop POS'} — ${branding.businessName || branding.tagline}`;
+  }, [settings]);
+
+  const applyBootstrapData = useCallback((data: BootstrapPayload) => {
+    setSettings(data.settings);
+    setCategories(data.categories);
+    setServices(data.services);
+    setInventory(data.inventory);
+    setStockMovements(data.stockMovements);
+    setCustomers(data.customers);
+    setTransactions(data.transactions);
+    setPrintJobs(data.printJobs);
+    setExpenses(data.expenses);
+    setShifts(data.shifts);
+    setUsers(data.users);
+    setAuditLogs(data.auditLogs);
+  }, []);
+
+  const refreshBootstrap = useCallback(async () => {
+    setLoadingData(true);
+    setDataError(null);
+    try {
+      const data = await apiRequest<BootstrapPayload>('/api/bootstrap');
+      applyBootstrapData(data);
+      setLastSyncedAt(data.serverTime || new Date().toISOString());
+      await saveOfflineSnapshot('bootstrap', data);
+    } catch (err) {
+      const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+      if (cached) {
+        applyBootstrapData(cached);
+        notify('Working from cached offline store data.', 'info');
+      } else {
+        setDataError(err instanceof Error ? err.message : 'Unable to load store records.');
+      }
+    } finally {
+      setLoadingData(false);
+    }
+  }, [applyBootstrapData, notify]);
+
+  const refreshAuthStatus = useCallback(async () => {
+    try {
+      const status = await apiRequest<{ needsSetup: boolean; quickUsers: QuickUserInfo[] }>(
+        '/api/auth/status',
+      );
+      setNeedsSetup(status.needsSetup);
+      setQuickUsers(status.quickUsers);
+    } catch {
+      const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+      if (cached?.users) {
+        setQuickUsers(
+          cached.users.map((u) => ({
+            id: u.id,
+            username: u.username,
+            fullName: u.fullName,
+            role: u.role,
+            hasPin: u.hasPin,
+          })),
+        );
+      }
+    } finally {
+      setAuthChecked(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAuthStatus();
+    void getOutboxMutations().then(setOutbox);
+  }, [refreshAuthStatus]);
+
+  const syncNow = useCallback(async () => {
+    if (!session || !isOnline || isSyncing) return;
+    const queue = await getOutboxMutations();
+    if (queue.length === 0) {
+      await refreshBootstrap();
+      return;
+    }
+    setIsSyncing(true);
+    try {
+      const res = await apiRequest<{
+        results: Array<{ clientMutationId: string; status: string; error?: string }>;
+        syncedAt: string;
+      }>('/api/sync/batch', {
+        method: 'POST',
+        body: JSON.stringify({ mutations: queue }),
+      });
+
+      let appliedCount = 0;
+      for (const item of res.results) {
+        const mut = queue.find((q) => q.clientMutationId === item.clientMutationId);
+        if (!mut) continue;
+        if (item.status === 'applied' || item.status === 'duplicate') {
+          await removeOutboxMutation(mut.id);
+          appliedCount++;
+        } else {
+          await updateOutboxMutation({
+            ...mut,
+            status: 'conflict',
+            retryCount: mut.retryCount + 1,
+            errorMessage: item.error || 'Sync conflict',
+          });
+        }
+      }
+      setOutbox(await getOutboxMutations());
+      setLastSyncedAt(res.syncedAt);
+      if (appliedCount > 0) {
+        notify(`Synchronized ${appliedCount} offline record(s).`, 'success');
+      }
+      await refreshBootstrap();
+    } catch (err) {
+      void appendDiagnosticLog({
+        level: 'warn',
+        category: 'sync',
+        message: err instanceof Error ? err.message : 'Batch sync failed',
+      });
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [isOnline, isSyncing, notify, refreshBootstrap, session]);
+
+  useEffect(() => {
+    if (isOnline && session && outbox.length > 0) {
+      void syncNow();
+    }
+  }, [isOnline, outbox.length, session, syncNow]);
+
+  const completeSignIn = useCallback(
+    async (authSession: AuthSession) => {
+      setMemoryToken(authSession.token);
+      setSession(authSession);
+      setIsLocked(false);
+      setNeedsSetup(false);
+      await refreshBootstrap();
+      setActiveModule(authSession.user.preferredLandingModule || settings.defaultLandingModule || 'pos');
+    },
+    [refreshBootstrap, settings.defaultLandingModule],
+  );
+
+  const setupAdmin = async (payload: {
+    username: string;
+    fullName: string;
+    email: string;
+    password: string;
+    pin: string;
+  }) => {
+    const dev = getDeviceDescriptor();
+    const res = await apiRequest<AuthSession>('/api/auth/setup-admin', {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, ...dev }),
+    });
+    await completeSignIn(res);
+    notify('Administrator account created and signed in.', 'success');
+  };
+
+  const loginWithPassword = async (username: string, password: string) => {
+    const dev = getDeviceDescriptor();
+    const res = await apiRequest<AuthSession>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, ...dev }),
+    });
+    await completeSignIn(res);
+    notify(`Signed in as ${res.user.fullName}.`, 'success');
+  };
+
+  const loginWithPin = async (userId: string, pin: string) => {
+    const dev = getDeviceDescriptor();
+    const res = await apiRequest<AuthSession>('/api/auth/pin-login', {
+      method: 'POST',
+      body: JSON.stringify({ userId, pin, ...dev }),
+    });
+    await completeSignIn(res);
+    notify(`Switched cashier to ${res.user.fullName}.`, 'success');
+  };
+
+  const logout = async () => {
+    try {
+      await apiRequest('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors on sign-out
+    }
+    setMemoryToken('');
+    setSession(null);
+    setIsLocked(false);
+    await refreshAuthStatus();
+  };
+
+  const saveSettings = async (next: AppSettings) => {
+    setSettings(next);
+    const updated = await apiRequest<AppSettings>('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify(next),
+    });
+    setSettings(updated);
+    notify('Settings saved.', 'success');
+  };
+
+  const submitTransaction = async (txn: Transaction) => {
+    if (!isOnline) {
+      const offlineTxn: Transaction = { ...txn, syncStatus: 'pending_sync' };
+      const mut: OfflineMutation = {
+        id: `mut_${Date.now()}`,
+        clientMutationId: txn.clientMutationId,
+        type: 'CREATE_TRANSACTION',
+        endpoint: '/api/transactions',
+        method: 'POST',
+        payload: offlineTxn,
+        status: 'pending',
+        retryCount: 0,
+        createdAt: new Date().toISOString(),
+      };
+      await enqueueOfflineMutation(mut);
+      setOutbox(await getOutboxMutations());
+      setTransactions((prev) => [offlineTxn, ...prev]);
+      notify('Offline mode: transaction queued safely for sync.', 'info');
+      return { transaction: offlineTxn, queuedOffline: true };
+    }
+
+    try {
+      const res = await apiRequest<{ transaction: Transaction; duplicate: boolean }>(
+        '/api/transactions',
+        {
+          method: 'POST',
+          body: JSON.stringify(txn),
+        },
+      );
+      await refreshBootstrap();
+      return { transaction: res.transaction, queuedOffline: false };
+    } catch (err) {
+      // Fallback to offline queue if network drops mid-checkout
+      if (err instanceof TypeError) {
+        const offlineTxn: Transaction = { ...txn, syncStatus: 'pending_sync' };
+        const mut: OfflineMutation = {
+          id: `mut_${Date.now()}`,
+          clientMutationId: txn.clientMutationId,
+          type: 'CREATE_TRANSACTION',
+          endpoint: '/api/transactions',
+          method: 'POST',
+          payload: offlineTxn,
+          status: 'pending',
+          retryCount: 0,
+          createdAt: new Date().toISOString(),
+        };
+        await enqueueOfflineMutation(mut);
+        setOutbox(await getOutboxMutations());
+        setTransactions((prev) => [offlineTxn, ...prev]);
+        notify('Connection lost: transaction queued for automatic sync.', 'info');
+        return { transaction: offlineTxn, queuedOffline: true };
+      }
+      throw err;
+    }
+  };
+
+  const deleteHeldOrder = async (id: string) => {
+    await apiRequest(`/api/transactions/${id}/held`, { method: 'DELETE' });
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const voidTransaction = async (id: string, reason: string) => {
+    const updated = await apiRequest<Transaction>(`/api/transactions/${id}/void`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+    setTransactions((prev) => prev.map((t) => (t.id === id ? updated : t)));
+    notify('Transaction voided.', 'info');
+  };
+
+  const refundTransaction = async (id: string, reason: string) => {
+    const updated = await apiRequest<Transaction>(`/api/transactions/${id}/refund`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+    await refreshBootstrap();
+    setTransactions((prev) => prev.map((t) => (t.id === id ? updated : t)));
+    notify('Refund recorded.', 'info');
+  };
+
+  const createCategory = async (name: string) => {
+    const cat = await apiRequest<ServiceCategory>('/api/categories', {
+      method: 'POST',
+      body: JSON.stringify({ name, sortOrder: categories.length + 1 }),
+    });
+    setCategories((prev) => [...prev, cat]);
+    notify(`Category "${name}" added.`, 'success');
+  };
+
+  const deleteCategory = async (id: string) => {
+    await apiRequest(`/api/categories/${id}`, { method: 'DELETE' });
+    setCategories((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const saveService = async (service: Partial<PrintService> & { id?: string }) => {
+    const saved = service.id
+      ? await apiRequest<PrintService>(`/api/services/${service.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(service),
+        })
+      : await apiRequest<PrintService>('/api/services', {
+          method: 'POST',
+          body: JSON.stringify(service),
+        });
+    await refreshBootstrap();
+    notify(`Service "${saved.name}" saved.`, 'success');
+    return saved;
+  };
+
+  const deleteService = async (id: string) => {
+    await apiRequest(`/api/services/${id}`, { method: 'DELETE' });
+    setServices((prev) => prev.filter((s) => s.id !== id));
+    notify('Service deleted.', 'info');
+  };
+
+  const createPrintJob = async (job: Partial<PrintJob>) => {
+    const created = await apiRequest<PrintJob>('/api/print-jobs', {
+      method: 'POST',
+      body: JSON.stringify(job),
+    });
+    setPrintJobs((prev) => [created, ...prev]);
+    notify(`Job Order ${created.jobOrderNumber} created.`, 'success');
+    return created;
+  };
+
+  const updatePrintJob = async (
+    id: string,
+    patch: {
+      productionStatus?: PrintJob['productionStatus'];
+      paymentStatus?: PrintJob['paymentStatus'];
+      assignedOperator?: string;
+      instructions?: string;
+      depositAmount?: number;
+      note?: string;
+    },
+  ) => {
+    const updated = await apiRequest<PrintJob>(`/api/print-jobs/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    setPrintJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+    notify('Print job updated.', 'success');
+  };
+
+  const createInventoryItem = async (item: Partial<InventoryItem>) => {
+    const created = await apiRequest<InventoryItem>('/api/inventory', {
+      method: 'POST',
+      body: JSON.stringify(item),
+    });
+    setInventory((prev) => [...prev, created]);
+    notify(`Added "${created.name}" to inventory.`, 'success');
+  };
+
+  const adjustInventory = async (
+    id: string,
+    payload: {
+      movementType: StockMovement['movementType'];
+      quantityDelta: number;
+      note: string;
+      reference?: string;
+    },
+  ) => {
+    await apiRequest(`/api/inventory/${id}/adjust`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await refreshBootstrap();
+    notify('Stock level updated.', 'success');
+  };
+
+  const createCustomer = async (customer: Partial<Customer>) => {
+    const created = await apiRequest<Customer>('/api/customers', {
+      method: 'POST',
+      body: JSON.stringify(customer),
+    });
+    setCustomers((prev) => [...prev, created]);
+    notify(`Customer "${created.name}" added.`, 'success');
+    return created;
+  };
+
+  const collectCustomerBalance = async (id: string, amount: number) => {
+    await apiRequest(`/api/customers/${id}/pay-balance`, {
+      method: 'POST',
+      body: JSON.stringify({ amount }),
+    });
+    await refreshBootstrap();
+    notify('Customer balance payment recorded.', 'success');
+  };
+
+  const createExpense = async (expense: Partial<ExpenseRecord>) => {
+    const created = await apiRequest<ExpenseRecord>('/api/expenses', {
+      method: 'POST',
+      body: JSON.stringify(expense),
+    });
+    setExpenses((prev) => [created, ...prev]);
+    notify('Expense recorded.', 'success');
+  };
+
+  const deleteExpense = async (id: string) => {
+    await apiRequest(`/api/expenses/${id}`, { method: 'DELETE' });
+    setExpenses((prev) => prev.filter((e) => e.id !== id));
+    notify('Expense removed.', 'info');
+  };
+
+  const startShift = async (openingCash: number) => {
+    await apiRequest('/api/shifts/start', {
+      method: 'POST',
+      body: JSON.stringify({ openingCash }),
+    });
+    await refreshBootstrap();
+    notify('Cashier shift started.', 'success');
+  };
+
+  const recordCashMovement = async (
+    shiftId: string,
+    type: 'cash_in' | 'cash_out',
+    amount: number,
+    reason: string,
+  ) => {
+    await apiRequest(`/api/shifts/${shiftId}/movement`, {
+      method: 'POST',
+      body: JSON.stringify({ type, amount, reason }),
+    });
+    await refreshBootstrap();
+    notify(`Recorded ${type === 'cash_in' ? 'Cash In' : 'Cash Out'}.`, 'success');
+  };
+
+  const closeShift = async (shiftId: string, actualCash: number, reconciliationNote: string) => {
+    await apiRequest(`/api/shifts/${shiftId}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ actualCash, reconciliationNote }),
+    });
+    await refreshBootstrap();
+    notify('Shift closed and reconciled.', 'success');
+  };
+
+  const seedDemo = async () => {
+    await apiRequest('/api/demo/seed', { method: 'POST' });
+    await refreshBootstrap();
+    notify('Demonstration catalog and sample records loaded.', 'success');
+  };
+
+  const clearDemo = async () => {
+    await apiRequest('/api/demo/clear', { method: 'POST' });
+    await refreshBootstrap();
+    notify('Demonstration records removed.', 'info');
+  };
+
+  const activeShift = useMemo(() => {
+    if (!session) return null;
+    return (
+      shifts.find((s) => s.status === 'open' && s.cashierId === session.user.id) ||
+      shifts.find((s) => s.status === 'open') ||
+      null
+    );
+  }, [session, shifts]);
+
+  const value: AppContextValue = {
+    authChecked,
+    needsSetup,
+    quickUsers,
+    session,
+    isLocked,
+    setIsLocked,
+    activeModule,
+    setActiveModule,
+    platformPreview,
+    setPlatformPreview,
+    fullScreenCashier,
+    setFullScreenCashier,
+    isOnline,
+    isSyncing,
+    pendingSyncCount: outbox.length,
+    lastSyncedAt,
+    outbox,
+    syncNow,
+    loadingData,
+    dataError,
+    settings,
+    categories,
+    services,
+    inventory,
+    stockMovements,
+    customers,
+    transactions,
+    printJobs,
+    expenses,
+    shifts,
+    activeShift,
+    users,
+    auditLogs,
+    toasts,
+    notify,
+    dismissToast,
+    refreshAuthStatus,
+    setupAdmin,
+    loginWithPassword,
+    loginWithPin,
+    logout,
+    refreshBootstrap,
+    saveSettings,
+    submitTransaction,
+    deleteHeldOrder,
+    voidTransaction,
+    refundTransaction,
+    createCategory,
+    deleteCategory,
+    saveService,
+    deleteService,
+    createPrintJob,
+    updatePrintJob,
+    createInventoryItem,
+    adjustInventory,
+    createCustomer,
+    collectCustomerBalance,
+    createExpense,
+    deleteExpense,
+    startShift,
+    recordCashMovement,
+    closeShift,
+    seedDemo,
+    clearDemo,
+  };
+
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+};
