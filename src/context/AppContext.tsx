@@ -17,11 +17,24 @@ import type {
   PrintJob,
   PrintService,
   ServiceCategory,
+  StockAdjustmentPayload,
   StockMovement,
+  SupplyCategory,
   ThemeMode,
   Transaction,
   UserAccount,
 } from '../shared/types.ts';
+import { DEFAULT_SUPPLY_CATEGORIES } from '../shared/defaults.ts';
+import {
+  calculateInventoryValuation,
+  computeSignedStockDelta,
+  inferReferenceType,
+  isLowStockItem,
+  normalizeInventoryItem,
+  normalizeStockMovement,
+  validateInventoryItemInput,
+  validateStockMovementInput,
+} from '../shared/inventoryModel.ts';
 import { apiRequest, getDeviceDescriptor, setMemoryToken } from '../services/apiClient.ts';
 import {
   appendDiagnosticLog,
@@ -48,9 +61,21 @@ export interface ToastMessage {
   text: string;
 }
 
+export interface InventoryStateSlice {
+  items: InventoryItem[];
+  stockMovements: StockMovement[];
+  supplyCategories: SupplyCategory[];
+  lowStockItems: InventoryItem[];
+  totalValuation: number;
+  loading: boolean;
+  error: string | null;
+  lastLoadedAt: string | null;
+}
+
 interface BootstrapPayload {
   settings: AppSettings;
   categories: ServiceCategory[];
+  supplyCategories?: SupplyCategory[];
   services: PrintService[];
   inventory: InventoryItem[];
   stockMovements: StockMovement[];
@@ -92,8 +117,10 @@ interface AppContextValue {
   dataError: string | null;
   settings: AppSettings;
   categories: ServiceCategory[];
+  supplyCategories: SupplyCategory[];
   services: PrintService[];
   inventory: InventoryItem[];
+  inventoryState: InventoryStateSlice;
   stockMovements: StockMovement[];
   customers: Customer[];
   transactions: Transaction[];
@@ -151,16 +178,16 @@ interface AppContextValue {
       note?: string;
     },
   ) => Promise<void>;
-  createInventoryItem: (item: Partial<InventoryItem>) => Promise<void>;
+  loadInventory: () => Promise<InventoryItem[]>;
+  createInventoryItem: (item: Partial<InventoryItem>) => Promise<InventoryItem>;
+  updateInventoryItem: (id: string, patch: Partial<InventoryItem>) => Promise<InventoryItem>;
+  trackStockChange: (id: string, payload: StockAdjustmentPayload) => Promise<StockMovement>;
   adjustInventory: (
     id: string,
-    payload: {
-      movementType: StockMovement['movementType'];
-      quantityDelta: number;
-      note: string;
-      reference?: string;
-    },
-  ) => Promise<void>;
+    payload: StockAdjustmentPayload,
+  ) => Promise<StockMovement>;
+  getInventoryItemById: (id: string) => InventoryItem | undefined;
+  getItemStockMovements: (inventoryItemId: string) => StockMovement[];
   createCustomer: (customer: Partial<Customer>) => Promise<Customer>;
   collectCustomerBalance: (id: string, amount: number) => Promise<void>;
   createExpense: (expense: Partial<ExpenseRecord>) => Promise<void>;
@@ -207,9 +234,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [loadingData, setLoadingData] = useState(false);
   const [dataError, setDataError] = useState<string | null>(null);
   const [categories, setCategories] = useState<ServiceCategory[]>([]);
+  const [supplyCategories, setSupplyCategories] = useState<SupplyCategory[]>(
+    DEFAULT_SUPPLY_CATEGORIES,
+  );
   const [services, setServices] = useState<PrintService[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
+  const [inventoryLastLoadedAt, setInventoryLastLoadedAt] = useState<string | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [printJobs, setPrintJobs] = useState<PrintJob[]>([]);
@@ -246,9 +279,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }));
       }
       setCategories(data.categories);
+      if (Array.isArray(data.supplyCategories) && data.supplyCategories.length > 0) {
+        setSupplyCategories(data.supplyCategories);
+      }
       setServices(data.services);
-      setInventory(data.inventory);
-      setStockMovements(data.stockMovements);
+      setInventory((data.inventory || []).map((item) => normalizeInventoryItem(item)));
+      setStockMovements(
+        (data.stockMovements || []).map((mov) => normalizeStockMovement(mov)),
+      );
+      setInventoryLastLoadedAt(data.serverTime || new Date().toISOString());
+      setInventoryError(null);
       setCustomers(data.customers);
       setTransactions(data.transactions);
       setPrintJobs(data.printJobs);
@@ -604,31 +644,218 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('Print job updated.', 'success');
   };
 
-  const createInventoryItem = async (item: Partial<InventoryItem>) => {
+  const loadInventory = useCallback(async (): Promise<InventoryItem[]> => {
+    setInventoryLoading(true);
+    setInventoryError(null);
+    try {
+      const data = await apiRequest<{
+        items: InventoryItem[];
+        stockMovements: StockMovement[];
+        supplyCategories?: SupplyCategory[];
+        serverTime: string;
+      }>('/api/inventory');
+
+      const normalizedItems = (data.items || []).map((item) => normalizeInventoryItem(item));
+      const normalizedMovements = (data.stockMovements || []).map((mov) =>
+        normalizeStockMovement(mov),
+      );
+      setInventory(normalizedItems);
+      setStockMovements(normalizedMovements);
+      if (Array.isArray(data.supplyCategories) && data.supplyCategories.length > 0) {
+        setSupplyCategories(data.supplyCategories);
+      }
+      setInventoryLastLoadedAt(data.serverTime || new Date().toISOString());
+
+      const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+      if (cached) {
+        await saveOfflineSnapshot('bootstrap', {
+          ...cached,
+          inventory: normalizedItems,
+          stockMovements: normalizedMovements,
+          supplyCategories: data.supplyCategories ?? cached.supplyCategories,
+        });
+      }
+      return normalizedItems;
+    } catch (err) {
+      const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+      if (cached?.inventory) {
+        const normalizedItems = cached.inventory.map((item) => normalizeInventoryItem(item));
+        const normalizedMovements = (cached.stockMovements || []).map((mov) =>
+          normalizeStockMovement(mov),
+        );
+        setInventory(normalizedItems);
+        setStockMovements(normalizedMovements);
+        return normalizedItems;
+      }
+      const message = err instanceof Error ? err.message : 'Unable to load inventory records.';
+      setInventoryError(message);
+      throw err;
+    } finally {
+      setInventoryLoading(false);
+    }
+  }, []);
+
+  const createInventoryItem = async (item: Partial<InventoryItem>): Promise<InventoryItem> => {
+    const validation = validateInventoryItemInput(item);
+    if (!validation.valid) {
+      throw new Error(validation.error);
+    }
     const created = await apiRequest<InventoryItem>('/api/inventory', {
       method: 'POST',
       body: JSON.stringify(item),
     });
-    setInventory((prev) => [...prev, created]);
-    notify(`Added "${created.name}" to inventory.`, 'success');
+    const normalized = normalizeInventoryItem(created);
+    setInventory((prev) =>
+      [...prev, normalized].sort((a, b) => a.name.localeCompare(b.name)),
+    );
+    if (normalized.quantityOnHand > 0) {
+      await loadInventory();
+    }
+    notify(`Added "${normalized.name}" to inventory.`, 'success');
+    return normalized;
   };
 
-  const adjustInventory = async (
+  const updateInventoryItem = async (
     id: string,
-    payload: {
-      movementType: StockMovement['movementType'];
-      quantityDelta: number;
-      note: string;
-      reference?: string;
-    },
-  ) => {
-    await apiRequest(`/api/inventory/${id}/adjust`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
+    patch: Partial<InventoryItem>,
+  ): Promise<InventoryItem> => {
+    const updated = await apiRequest<InventoryItem>(`/api/inventory/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     });
-    await refreshBootstrap();
-    notify('Stock level updated.', 'success');
+    const normalized = normalizeInventoryItem(updated);
+    setInventory((prev) => prev.map((item) => (item.id === id ? normalized : item)));
+    notify(`Updated "${normalized.name}".`, 'success');
+    return normalized;
   };
+
+  const trackStockChange = async (
+    id: string,
+    payload: StockAdjustmentPayload,
+  ): Promise<StockMovement> => {
+    const validation = validateStockMovementInput({
+      movementType: payload.movementType,
+      quantityDelta: payload.quantityDelta,
+    });
+    if (!validation.valid) {
+      throw new Error(validation.error);
+    }
+
+    const applyOptimisticOffline = async (): Promise<StockMovement> => {
+      const target = inventory.find((item) => item.id === id);
+      if (!target) {
+        throw new Error('Inventory item not found.');
+      }
+      const signedDelta = computeSignedStockDelta(
+        payload.movementType,
+        payload.quantityDelta,
+      );
+      const qtyBefore = Number(target.quantityOnHand) || 0;
+      const nextQty = Math.max(0, Number((qtyBefore + signedDelta).toFixed(2)));
+      const now = new Date().toISOString();
+      const occurredAt = payload.occurredAt || now;
+      const restockedAt =
+        signedDelta > 0 &&
+        (payload.movementType === 'purchase' || payload.movementType === 'return')
+          ? occurredAt
+          : target.lastRestockedAt ?? null;
+
+      const updatedItem = normalizeInventoryItem({
+        ...target,
+        quantityOnHand: nextQty,
+        lastRestockedAt: restockedAt,
+        updatedAt: now,
+      });
+      const movement = normalizeStockMovement({
+        id: `mov_off_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        inventoryItemId: target.id,
+        itemName: target.name,
+        movementType: payload.movementType,
+        quantityBefore: qtyBefore,
+        quantityDelta: signedDelta,
+        balanceAfter: nextQty,
+        unitCostAtMovement: target.unitCost,
+        referenceType: payload.referenceType || inferReferenceType(payload.movementType),
+        reference: payload.reference || '',
+        performedById: session?.user.id || '',
+        performedBy: session?.user.fullName || 'Offline Cashier',
+        note: payload.note || '',
+        occurredAt,
+        createdAt: now,
+      });
+
+      const mut: OfflineMutation = {
+        id: `mut_inv_${Date.now()}`,
+        clientMutationId: `inv_adj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type: 'ADJUST_INVENTORY',
+        endpoint: `/api/inventory/${id}/adjust`,
+        method: 'POST',
+        payload: { inventoryItemId: id, ...payload },
+        status: 'pending',
+        retryCount: 0,
+        createdAt: now,
+      };
+      await enqueueOfflineMutation(mut);
+      setOutbox(await getOutboxMutations());
+      setInventory((prev) => prev.map((item) => (item.id === id ? updatedItem : item)));
+      setStockMovements((prev) => [movement, ...prev]);
+      notify('Offline mode: stock adjustment queued for sync.', 'info');
+      return movement;
+    };
+
+    if (!isOnline) {
+      return applyOptimisticOffline();
+    }
+
+    try {
+      const res = await apiRequest<{
+        id: string;
+        quantityOnHand: number;
+        lastRestockedAt: string | null;
+        updatedAt: string;
+        item?: InventoryItem;
+        movement: StockMovement;
+      }>(`/api/inventory/${id}/adjust`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      const normalizedMovement = normalizeStockMovement(res.movement);
+      setInventory((prev) =>
+        prev.map((item) => {
+          if (item.id !== id) return item;
+          if (res.item) return normalizeInventoryItem(res.item);
+          return normalizeInventoryItem({
+            ...item,
+            quantityOnHand: res.quantityOnHand,
+            lastRestockedAt: res.lastRestockedAt,
+            updatedAt: res.updatedAt,
+          });
+        }),
+      );
+      setStockMovements((prev) => [normalizedMovement, ...prev]);
+      notify('Stock level updated.', 'success');
+      return normalizedMovement;
+    } catch (err) {
+      if (err instanceof TypeError) {
+        return applyOptimisticOffline();
+      }
+      throw err;
+    }
+  };
+
+  const adjustInventory = trackStockChange;
+
+  const getInventoryItemById = useCallback(
+    (id: string) => inventory.find((item) => item.id === id),
+    [inventory],
+  );
+
+  const getItemStockMovements = useCallback(
+    (inventoryItemId: string) =>
+      stockMovements.filter((mov) => mov.inventoryItemId === inventoryItemId),
+    [stockMovements],
+  );
 
   const createCustomer = async (customer: Partial<Customer>) => {
     const created = await apiRequest<Customer>('/api/customers', {
@@ -717,6 +944,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   }, [session, shifts]);
 
+  const inventoryState = useMemo<InventoryStateSlice>(
+    () => ({
+      items: inventory,
+      stockMovements,
+      supplyCategories,
+      lowStockItems: inventory.filter((item) => isLowStockItem(item)),
+      totalValuation: calculateInventoryValuation(inventory),
+      loading: inventoryLoading,
+      error: inventoryError,
+      lastLoadedAt: inventoryLastLoadedAt,
+    }),
+    [
+      inventory,
+      inventoryError,
+      inventoryLastLoadedAt,
+      inventoryLoading,
+      stockMovements,
+      supplyCategories,
+    ],
+  );
+
   const value: AppContextValue = {
     authChecked,
     needsSetup,
@@ -740,8 +988,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     dataError,
     settings,
     categories,
+    supplyCategories,
     services,
     inventory,
+    inventoryState,
     stockMovements,
     customers,
     transactions,
@@ -777,8 +1027,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     deleteService,
     createPrintJob,
     updatePrintJob,
+    loadInventory,
     createInventoryItem,
+    updateInventoryItem,
+    trackStockChange,
     adjustInventory,
+    getInventoryItemById,
+    getItemStockMovements,
     createCustomer,
     collectCustomerBalance,
     createExpense,

@@ -3,12 +3,14 @@ import fs from 'fs';
 import path from 'path';
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_SUPPLY_CATEGORIES,
   DEMO_CATEGORIES,
   DEMO_CUSTOMERS,
   DEMO_EXPENSES,
   DEMO_INVENTORY,
   DEMO_PRINT_JOBS,
   DEMO_SERVICES,
+  DEMO_STOCK_MOVEMENTS,
   DEMO_TRANSACTIONS,
 } from '../shared/defaults.ts';
 
@@ -90,18 +92,37 @@ export function initDatabase() {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS supply_categories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      default_unit TEXT NOT NULL DEFAULT 'pc',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_demo INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS inventory_items (
       id TEXT PRIMARY KEY,
       sku TEXT NOT NULL,
+      barcode TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
+      category_id TEXT NOT NULL DEFAULT '',
       category TEXT NOT NULL,
       item_type TEXT NOT NULL CHECK(item_type IN ('consumable', 'finished_product')),
       unit TEXT NOT NULL,
       quantity_on_hand REAL NOT NULL DEFAULT 0,
+      reserved_quantity REAL NOT NULL DEFAULT 0,
       reorder_level REAL NOT NULL DEFAULT 0,
+      reorder_quantity REAL NOT NULL DEFAULT 0,
       unit_cost REAL NOT NULL DEFAULT 0,
       supplier TEXT NOT NULL DEFAULT '',
+      supplier_contact TEXT NOT NULL DEFAULT '',
+      supplier_sku TEXT NOT NULL DEFAULT '',
+      lead_time_days INTEGER NOT NULL DEFAULT 0,
+      storage_location TEXT NOT NULL DEFAULT '',
+      last_restocked_at TEXT,
       is_demo INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL
     );
 
@@ -110,11 +131,16 @@ export function initDatabase() {
       inventory_item_id TEXT NOT NULL,
       item_name TEXT NOT NULL,
       movement_type TEXT NOT NULL,
+      quantity_before REAL NOT NULL DEFAULT 0,
       quantity_delta REAL NOT NULL,
       balance_after REAL NOT NULL,
+      unit_cost_at_movement REAL NOT NULL DEFAULT 0,
+      reference_type TEXT NOT NULL DEFAULT 'manual',
       reference TEXT NOT NULL DEFAULT '',
+      performed_by_id TEXT NOT NULL DEFAULT '',
       performed_by TEXT NOT NULL,
       note TEXT NOT NULL DEFAULT '',
+      occurred_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL
     );
 
@@ -232,6 +258,45 @@ export function initDatabase() {
     );
   `);
 
+  // Safe idempotent column migrations for existing databases
+  const ensureColumn = (table: string, column: string, definition: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  };
+
+  ensureColumn('inventory_items', 'barcode', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('inventory_items', 'category_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('inventory_items', 'reserved_quantity', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('inventory_items', 'reorder_quantity', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('inventory_items', 'supplier_contact', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('inventory_items', 'supplier_sku', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('inventory_items', 'lead_time_days', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('inventory_items', 'storage_location', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('inventory_items', 'last_restocked_at', 'TEXT');
+  ensureColumn('inventory_items', 'created_at', "TEXT NOT NULL DEFAULT ''");
+
+  ensureColumn('stock_movements', 'quantity_before', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('stock_movements', 'unit_cost_at_movement', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('stock_movements', 'reference_type', "TEXT NOT NULL DEFAULT 'manual'");
+  ensureColumn('stock_movements', 'performed_by_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('stock_movements', 'occurred_at', "TEXT NOT NULL DEFAULT ''");
+
+  // Ensure default supply categories exist
+  const supplyCatCount = (
+    db.prepare('SELECT COUNT(*) as count FROM supply_categories').get() as { count: number }
+  ).count;
+  if (supplyCatCount === 0) {
+    const insertSupCat = db.prepare(`
+      INSERT OR IGNORE INTO supply_categories (id, name, description, default_unit, sort_order, is_demo)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const sc of DEFAULT_SUPPLY_CATEGORIES) {
+      insertSupCat.run(sc.id, sc.name, sc.description, sc.defaultUnit, sc.sortOrder, sc.isDemo ? 1 : 0);
+    }
+  }
+
   // Ensure default settings exist
   const settingsRow = db.prepare('SELECT value_json FROM app_settings WHERE key = ?').get('app_settings') as
     | { value_json: string }
@@ -260,24 +325,71 @@ export function seedDemoDataset() {
       insertCat.run(c.id, c.name, c.sortOrder);
     }
 
+    const insertSupCat = db.prepare(`
+      INSERT OR IGNORE INTO supply_categories (id, name, description, default_unit, sort_order, is_demo)
+      VALUES (?, ?, ?, ?, ?, 1)
+    `);
+    for (const sc of DEFAULT_SUPPLY_CATEGORIES) {
+      insertSupCat.run(sc.id, sc.name, sc.description, sc.defaultUnit, sc.sortOrder);
+    }
+
     const insertInv = db.prepare(`
       INSERT OR IGNORE INTO inventory_items (
-        id, sku, name, category, item_type, unit, quantity_on_hand, reorder_level, unit_cost, supplier, is_demo, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        id, sku, barcode, name, category_id, category, item_type, unit, quantity_on_hand, reserved_quantity,
+        reorder_level, reorder_quantity, unit_cost, supplier, supplier_contact, supplier_sku,
+        lead_time_days, storage_location, last_restocked_at, is_demo, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `);
     for (const inv of DEMO_INVENTORY) {
       insertInv.run(
         inv.id,
         inv.sku,
+        inv.barcode || '',
         inv.name,
+        inv.categoryId || '',
         inv.category,
         inv.itemType,
         inv.unit,
         inv.quantityOnHand,
+        inv.reservedQuantity || 0,
         inv.reorderLevel,
+        inv.reorderQuantity || 0,
         inv.unitCost,
         inv.supplier,
+        inv.supplierContact || '',
+        inv.supplierSku || '',
+        inv.leadTimeDays || 0,
+        inv.storageLocation || '',
+        inv.lastRestockedAt || null,
+        inv.createdAt || inv.updatedAt,
         inv.updatedAt,
+      );
+    }
+
+    const insertMov = db.prepare(`
+      INSERT OR IGNORE INTO stock_movements (
+        id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
+        balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
+        performed_by, note, occurred_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const m of DEMO_STOCK_MOVEMENTS) {
+      insertMov.run(
+        m.id,
+        m.inventoryItemId,
+        m.itemName,
+        m.movementType,
+        m.quantityBefore ?? Math.max(0, m.balanceAfter - m.quantityDelta),
+        m.quantityDelta,
+        m.balanceAfter,
+        m.unitCostAtMovement ?? 0,
+        m.referenceType || 'manual',
+        m.reference,
+        m.performedById || '',
+        m.performedBy,
+        m.note,
+        m.occurredAt || m.createdAt,
+        m.createdAt,
       );
     }
 

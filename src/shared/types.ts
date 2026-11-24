@@ -378,33 +378,18 @@ export interface PrintJob {
   updatedAt: string;
 }
 
-export interface InventoryItem {
-  id: string;
-  sku: string;
-  name: string;
-  category: string;
-  itemType: 'consumable' | 'finished_product';
-  unit: string;
-  quantityOnHand: number;
-  reorderLevel: number;
-  unitCost: number;
-  supplier: string;
-  isDemo?: boolean;
-  updatedAt: string;
-}
-
-export interface StockMovement {
-  id: string;
-  inventoryItemId: string;
-  itemName: string;
-  movementType: 'purchase' | 'sale_deduction' | 'adjustment' | 'wastage' | 'damaged' | 'return';
-  quantityDelta: number;
-  balanceAfter: number;
-  reference: string;
-  performedBy: string;
-  note: string;
-  createdAt: string;
-}
+export type {
+  InventoryItem,
+  InventoryItemType,
+  InventoryStockFilter,
+  InventorySupplierInfo,
+  StockAdjustmentPayload,
+  StockMovement,
+  StockMovementReferenceType,
+  StockMovementType,
+  StockStatus,
+  SupplyCategory,
+} from '../types/inventory.ts';
 
 export interface ExpenseRecord {
   id: string;

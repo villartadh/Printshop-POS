@@ -1,87 +1,208 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowUpDown, Plus } from 'lucide-react';
+import { ArrowUpDown, Edit2, Plus, RefreshCw } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
-import type { InventoryItem, StockMovement } from '../../shared/types.ts';
+import {
+  filterInventoryItems,
+  getAvailableStock,
+  getInventoryStockStatus,
+  getSuggestedRestockQuantity,
+  resolveSupplyCategory,
+  STOCK_MOVEMENT_LABELS,
+} from '../../shared/inventoryModel.ts';
+import type {
+  InventoryItem,
+  StockMovementType,
+  SupplyCategory,
+} from '../../types/inventory.ts';
 import { Button, Card, Input, Select, StatusIndicator } from '../../components/ui/Primitives.tsx';
 import { DataTable } from '../../components/ui/DataTable.tsx';
 import { Modal } from '../../components/ui/Overlays.tsx';
 
 export const InventoryModule: React.FC = () => {
-  const { settings, inventory, stockMovements, createInventoryItem, adjustInventory } = useApp();
+  const {
+    session,
+    settings,
+    inventoryState,
+    loadInventory,
+    createInventoryItem,
+    updateInventoryItem,
+    trackStockChange,
+  } = useApp();
+  const {
+    items: inventory,
+    stockMovements,
+    supplyCategories,
+    lowStockItems: lowStock,
+    totalValuation,
+    loading: loadingInventory,
+    error: inventoryError,
+  } = inventoryState;
   const taxCurr = settings.taxAndCurrency;
+  const canEditCatalog =
+    session?.user.role === 'admin' || session?.user.role === 'manager';
 
   const [tab, setTab] = useState<'items' | 'low_stock' | 'movements'>('items');
   const [search, setSearch] = useState('');
-  const [addOpen, setAddOpen] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [itemModalOpen, setItemModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [adjustTarget, setAdjustTarget] = useState<InventoryItem | null>(null);
 
-  // Add item form
+  // Add/Edit item form
   const [name, setName] = useState('');
   const [sku, setSku] = useState('');
-  const [category, setCategory] = useState('Paper');
+  const [selectedCategoryId, setSelectedCategoryId] = useState(
+    supplyCategories[0]?.id || 'sup-cat-paper',
+  );
+  const [categoryName, setCategoryName] = useState(supplyCategories[0]?.name || 'Paper');
   const [itemType, setItemType] = useState<'consumable' | 'finished_product'>('consumable');
-  const [unit, setUnit] = useState('sheet');
+  const [unit, setUnit] = useState(supplyCategories[0]?.defaultUnit || 'sheet');
   const [qty, setQty] = useState('100');
   const [reorder, setReorder] = useState('50');
+  const [reorderQty, setReorderQty] = useState('200');
   const [cost, setCost] = useState('1.50');
   const [supplier, setSupplier] = useState('');
+  const [supplierContact, setSupplierContact] = useState('');
+  const [supplierSku, setSupplierSku] = useState('');
+  const [storageLocation, setStorageLocation] = useState('');
 
   // Adjust form
-  const [movementType, setMovementType] = useState<StockMovement['movementType']>('purchase');
+  const [movementType, setMovementType] = useState<StockMovementType>('purchase');
   const [delta, setDelta] = useState('50');
+  const [reference, setReference] = useState('');
   const [note, setNote] = useState('');
-
-  const lowStock = useMemo(
-    () => inventory.filter((i) => i.quantityOnHand <= i.reorderLevel),
-    [inventory],
-  );
-  const totalValuation = useMemo(
-    () => inventory.reduce((s, i) => s + i.quantityOnHand * i.unitCost, 0),
-    [inventory],
-  );
 
   const visibleItems = useMemo(() => {
     const base = tab === 'low_stock' ? lowStock : inventory;
-    const q = search.trim().toLowerCase();
-    return q
-      ? base.filter(
-          (i) =>
-            i.name.toLowerCase().includes(q) ||
-            i.sku.toLowerCase().includes(q) ||
-            i.supplier.toLowerCase().includes(q),
-        )
-      : base;
-  }, [tab, lowStock, inventory, search]);
+    return filterInventoryItems(
+      base,
+      {
+        search,
+        categoryId: categoryFilter,
+      },
+      supplyCategories,
+    );
+  }, [tab, lowStock, inventory, search, categoryFilter, supplyCategories]);
 
-  const handleAddItem = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await createInventoryItem({
-      name,
-      sku: sku || `MAT-${Date.now().toString().slice(-4)}`,
-      category,
-      itemType,
-      unit,
-      quantityOnHand: Number(qty) || 0,
-      reorderLevel: Number(reorder) || 0,
-      unitCost: Number(cost) || 0,
-      supplier,
-    });
+  const handleSelectSupplyCategory = (catId: string, applyDefaultUnit: boolean) => {
+    setSelectedCategoryId(catId);
+    const matched: SupplyCategory | undefined = resolveSupplyCategory(supplyCategories, catId);
+    if (matched) {
+      setCategoryName(matched.name);
+      if (applyDefaultUnit) {
+        setUnit(matched.defaultUnit);
+      }
+    }
+  };
+
+  const openNewItemModal = () => {
+    const firstCat = supplyCategories[0];
+    setEditingItem(null);
     setName('');
     setSku('');
+    setSelectedCategoryId(firstCat?.id || 'sup-cat-paper');
+    setCategoryName(firstCat?.name || 'Paper');
+    setItemType('consumable');
+    setUnit(firstCat?.defaultUnit || 'sheet');
+    setQty('100');
+    setReorder('50');
+    setReorderQty('200');
+    setCost('1.50');
     setSupplier('');
-    setAddOpen(false);
+    setSupplierContact('');
+    setSupplierSku('');
+    setStorageLocation('');
+    setItemModalOpen(true);
+  };
+
+  const openEditItemModal = (item: InventoryItem) => {
+    const matched = resolveSupplyCategory(
+      supplyCategories,
+      item.categoryId || item.category,
+    );
+    const sup = item.supplierInfo;
+    setEditingItem(item);
+    setName(item.name);
+    setSku(item.sku);
+    setSelectedCategoryId(matched?.id || 'custom');
+    setCategoryName(item.category);
+    setItemType(item.itemType);
+    setUnit(item.unit);
+    setQty(String(item.quantityOnHand));
+    setReorder(String(item.reorderLevel));
+    setReorderQty(String(item.reorderQuantity ?? Math.max(item.reorderLevel * 2, 0)));
+    setCost(String(item.unitCost));
+    setSupplier(sup?.name || item.supplier || '');
+    setSupplierContact(sup?.contact || item.supplierContact || '');
+    setSupplierSku(sup?.supplierSku || item.supplierSku || '');
+    setStorageLocation(item.storageLocation || '');
+    setItemModalOpen(true);
+  };
+
+  const handleSaveItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const resolvedCatId =
+      selectedCategoryId === 'custom' ? undefined : selectedCategoryId;
+    const supplierInfoPayload = supplier.trim()
+      ? {
+          name: supplier.trim(),
+          contact: supplierContact.trim(),
+          supplierSku: supplierSku.trim(),
+        }
+      : undefined;
+
+    if (editingItem) {
+      await updateInventoryItem(editingItem.id, {
+        name,
+        sku,
+        categoryId: resolvedCatId,
+        category: categoryName,
+        itemType,
+        unit,
+        reorderLevel: Number(reorder) || 0,
+        reorderQuantity: Number(reorderQty) || 0,
+        unitCost: Number(cost) || 0,
+        supplier,
+        supplierContact,
+        supplierSku,
+        supplierInfo: supplierInfoPayload,
+        storageLocation,
+      });
+    } else {
+      await createInventoryItem({
+        name,
+        sku: sku || `MAT-${Date.now().toString().slice(-4)}`,
+        categoryId: resolvedCatId,
+        category: categoryName,
+        itemType,
+        unit,
+        quantityOnHand: Number(qty) || 0,
+        reorderLevel: Number(reorder) || 0,
+        reorderQuantity: Number(reorderQty) || 0,
+        unitCost: Number(cost) || 0,
+        supplier,
+        supplierContact,
+        supplierSku,
+        supplierInfo: supplierInfoPayload,
+        storageLocation,
+      });
+    }
+    setItemModalOpen(false);
+    setEditingItem(null);
   };
 
   const handleAdjust = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adjustTarget) return;
-    await adjustInventory(adjustTarget.id, {
+    await trackStockChange(adjustTarget.id, {
       movementType,
       quantityDelta: Number(delta) || 0,
+      reference,
       note,
     });
     setAdjustTarget(null);
+    setReference('');
     setNote('');
   };
 
@@ -91,14 +212,34 @@ export const InventoryModule: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-[var(--pos-text)]">Inventory & Consumables</h1>
           <p className="text-xs text-[var(--pos-text-muted)]">
-            Track printing paper, ink, tarpaulin rolls, finished goods, and stock wastage
+            Track stock counts, supply categories, reorder levels, suppliers, and usage movements
           </p>
         </div>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <Plus className="w-4 h-4" />
-          Add Material / Product
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            className="whitespace-nowrap shrink-0"
+            disabled={loadingInventory}
+            onClick={() => void loadInventory()}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingInventory ? 'animate-spin' : ''}`} />
+            {loadingInventory ? 'Refreshing...' : 'Refresh'}
+          </Button>
+          {canEditCatalog && (
+            <Button size="sm" className="whitespace-nowrap shrink-0" onClick={openNewItemModal}>
+              <Plus className="w-4 h-4" />
+              Add Material / Product
+            </Button>
+          )}
+        </div>
       </div>
+
+      {inventoryError && (
+        <div className="px-3 py-2 text-xs font-medium text-[#DC2626] bg-[#DC2626]/10 border border-[#DC2626]/25 rounded-lg">
+          {inventoryError}
+        </div>
+      )}
 
       {/* KPI Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -120,13 +261,13 @@ export const InventoryModule: React.FC = () => {
         </Card>
       </div>
 
-      {/* Tabs & Search */}
+      {/* Tabs, SupplyCategory Filter & Search */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg">
           <button
             type="button"
             onClick={() => setTab('items')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer ${
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap ${
               tab === 'items'
                 ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs'
                 : 'text-[var(--pos-text-muted)]'
@@ -137,7 +278,7 @@ export const InventoryModule: React.FC = () => {
           <button
             type="button"
             onClick={() => setTab('low_stock')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer ${
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap ${
               tab === 'low_stock'
                 ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs'
                 : 'text-[var(--pos-text-muted)]'
@@ -148,7 +289,7 @@ export const InventoryModule: React.FC = () => {
           <button
             type="button"
             onClick={() => setTab('movements')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer ${
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap ${
               tab === 'movements'
                 ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs'
                 : 'text-[var(--pos-text-muted)]'
@@ -157,13 +298,30 @@ export const InventoryModule: React.FC = () => {
             Stock Movements
           </button>
         </div>
+
         {tab !== 'movements' && (
-          <div className="w-full sm:w-64">
-            <Input
-              placeholder="Search SKU, material, supplier..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <div className="w-full sm:w-44">
+              <Select
+                aria-label="Filter by supply category"
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                options={[
+                  { value: 'all', label: 'All Supply Categories' },
+                  ...supplyCategories.map((sc) => ({
+                    value: sc.id,
+                    label: sc.name,
+                  })),
+                ]}
+              />
+            </div>
+            <div className="w-full sm:w-60">
+              <Input
+                placeholder="Search SKU, material, supplier..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -175,23 +333,30 @@ export const InventoryModule: React.FC = () => {
           columns={[
             {
               key: 'item',
-              label: 'Material / Product',
+              label: 'Material / Reference',
               render: (m) => (
                 <div>
                   <div className="text-sm font-medium">{m.itemName}</div>
                   <div className="text-[11px] text-[var(--pos-text-muted)]">
-                    {m.performedBy} · {new Date(m.createdAt).toLocaleString()}
+                    {m.performedBy}
+                    {m.reference ? ` · Ref: ${m.reference}` : ''}
+                    {m.note ? ` · ${m.note}` : ''}
                   </div>
                 </div>
               ),
             },
             {
               key: 'type',
-              label: 'Type',
+              label: 'Movement',
               render: (m) => (
-                <span className="text-xs capitalize text-[var(--pos-text-muted)]">
-                  {m.movementType.replace(/_/g, ' ')}
-                </span>
+                <div>
+                  <div className="text-xs font-medium text-[var(--pos-text)]">
+                    {STOCK_MOVEMENT_LABELS[m.movementType] || m.movementType}
+                  </div>
+                  <div className="text-[11px] text-[var(--pos-text-muted)]">
+                    {new Date(m.occurredAt || m.createdAt).toLocaleString()}
+                  </div>
+                </div>
               ),
             },
             {
@@ -210,9 +375,14 @@ export const InventoryModule: React.FC = () => {
             },
             {
               key: 'after',
-              label: 'Balance',
+              label: 'Before → After',
               align: 'right',
-              render: (m) => <span className="font-mono-num">{m.balanceAfter}</span>,
+              render: (m) => (
+                <span className="font-mono-num text-xs">
+                  {m.quantityBefore !== undefined ? `${m.quantityBefore} → ` : ''}
+                  <strong className="font-semibold text-[var(--pos-text)]">{m.balanceAfter}</strong>
+                </span>
+              ),
             },
           ]}
         />
@@ -223,25 +393,43 @@ export const InventoryModule: React.FC = () => {
           columns={[
             {
               key: 'name',
-              label: 'Item',
-              render: (i) => (
-                <div>
-                  <div className="text-sm font-semibold">{i.name}</div>
-                  <div className="text-[11px] text-[var(--pos-text-muted)]">
-                    {i.sku} · {i.category} · {i.supplier || 'No supplier'}
+              label: 'Item & Supplier',
+              render: (i) => {
+                const supName = i.supplierInfo?.name || i.supplier || 'No supplier';
+                const supContact = i.supplierInfo?.contact || i.supplierContact;
+                return (
+                  <div>
+                    <div className="text-sm font-semibold">{i.name}</div>
+                    <div className="text-[11px] text-[var(--pos-text-muted)]">
+                      {i.sku} · {i.category}
+                      {i.storageLocation ? ` · ${i.storageLocation}` : ''}
+                    </div>
+                    <div className="text-[11px] text-[var(--pos-text-muted)]">
+                      {supName}
+                      {supContact ? ` · ${supContact}` : ''}
+                    </div>
                   </div>
-                </div>
-              ),
+                );
+              },
             },
             {
               key: 'qty',
-              label: 'On Hand',
+              label: 'On Hand / Reorder',
               align: 'right',
-              render: (i) => (
-                <span className="font-mono-num font-semibold">
-                  {i.quantityOnHand} {i.unit}
-                </span>
-              ),
+              render: (i) => {
+                const avail = getAvailableStock(i);
+                return (
+                  <div>
+                    <div className="font-mono-num font-semibold">
+                      {i.quantityOnHand} {i.unit}
+                    </div>
+                    <div className="text-[11px] text-[var(--pos-text-muted)] font-mono-num">
+                      Min {i.reorderLevel}
+                      {(i.reservedQuantity || 0) > 0 ? ` · Avail ${avail}` : ''}
+                    </div>
+                  </div>
+                );
+              },
             },
             {
               key: 'cost',
@@ -255,59 +443,82 @@ export const InventoryModule: React.FC = () => {
             {
               key: 'status',
               label: 'Status',
-              render: (i) => (
-                <StatusIndicator
-                  tone={
-                    i.quantityOnHand <= 0
-                      ? 'error'
-                      : i.quantityOnHand <= i.reorderLevel
-                        ? 'warning'
-                        : 'success'
-                  }
-                  label={
-                    i.quantityOnHand <= 0
-                      ? 'Out of Stock'
-                      : i.quantityOnHand <= i.reorderLevel
-                        ? 'Low Stock'
-                        : 'In Stock'
-                  }
-                />
-              ),
+              render: (i) => {
+                const status = getInventoryStockStatus(i);
+                return (
+                  <StatusIndicator
+                    tone={
+                      status === 'out_of_stock'
+                        ? 'error'
+                        : status === 'low_stock'
+                          ? 'warning'
+                          : 'success'
+                    }
+                    label={
+                      status === 'out_of_stock'
+                        ? 'Out of Stock'
+                        : status === 'low_stock'
+                          ? 'Low Stock'
+                          : 'In Stock'
+                    }
+                  />
+                );
+              },
             },
             {
               key: 'action',
-              label: 'Adjust',
+              label: 'Actions',
               align: 'right',
               render: (i) => (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    setAdjustTarget(i);
-                    setMovementType('purchase');
-                    setDelta('50');
-                  }}
-                >
-                  <ArrowUpDown className="w-3.5 h-3.5" />
-                  Stock
-                </Button>
+                <div className="inline-flex items-center justify-end gap-1.5">
+                  {canEditCatalog && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => openEditItemModal(i)}
+                      title="Edit item & supplier details"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const suggested = getSuggestedRestockQuantity(i);
+                      setAdjustTarget(i);
+                      setMovementType('purchase');
+                      setDelta(String(suggested > 0 ? suggested : 50));
+                      setReference('');
+                      setNote('');
+                    }}
+                  >
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                    Stock
+                  </Button>
+                </div>
               ),
             },
           ]}
         />
       )}
 
-      {/* Add Material Modal */}
+      {/* Add / Edit Material Modal */}
       <Modal
-        open={addOpen}
-        onClose={() => setAddOpen(false)}
-        title="Add Inventory Material or Product"
+        open={itemModalOpen}
+        onClose={() => setItemModalOpen(false)}
+        title={editingItem ? `Edit Item · ${editingItem.name}` : 'Add Inventory Material or Product'}
         maxWidth="md"
       >
-        <form onSubmit={handleAddItem} className="space-y-3.5">
+        <form onSubmit={handleSaveItem} className="space-y-3.5">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Input label="Item Name" value={name} onChange={(e) => setName(e.target.value)} required />
-            <Input label="SKU" value={sku} onChange={(e) => setSku(e.target.value)} placeholder="Auto if empty" />
+            <Input
+              label="SKU"
+              value={sku}
+              onChange={(e) => setSku(e.target.value)}
+              placeholder="Auto if empty"
+            />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Select
@@ -319,12 +530,61 @@ export const InventoryModule: React.FC = () => {
                 { value: 'finished_product', label: 'Finished Product' },
               ]}
             />
-            <Input label="Category" value={category} onChange={(e) => setCategory(e.target.value)} />
-            <Input label="Unit (sheet, pc, sq ft)" value={unit} onChange={(e) => setUnit(e.target.value)} required />
+            <Select
+              label="Supply Category"
+              value={selectedCategoryId}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === 'custom') {
+                  setSelectedCategoryId('custom');
+                } else {
+                  handleSelectSupplyCategory(val, !editingItem);
+                }
+              }}
+              options={[
+                ...supplyCategories.map((sc) => ({
+                  value: sc.id,
+                  label: `${sc.name} (${sc.defaultUnit})`,
+                })),
+                { value: 'custom', label: 'Custom Category' },
+              ]}
+            />
+            <Input
+              label="Unit (sheet, pc, sq ft)"
+              value={unit}
+              onChange={(e) => setUnit(e.target.value)}
+              required
+            />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <Input label="Initial Stock" type="number" value={qty} onChange={(e) => setQty(e.target.value)} />
-            <Input label="Reorder Level" type="number" value={reorder} onChange={(e) => setReorder(e.target.value)} />
+          {selectedCategoryId === 'custom' && (
+            <Input
+              label="Custom Category Name"
+              value={categoryName}
+              onChange={(e) => setCategoryName(e.target.value)}
+              required
+            />
+          )}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {!editingItem && (
+              <Input
+                label="Initial Stock"
+                type="number"
+                value={qty}
+                onChange={(e) => setQty(e.target.value)}
+              />
+            )}
+            <Input
+              label="Reorder Level"
+              type="number"
+              value={reorder}
+              onChange={(e) => setReorder(e.target.value)}
+            />
+            <Input
+              label="Reorder Qty"
+              type="number"
+              value={reorderQty}
+              onChange={(e) => setReorderQty(e.target.value)}
+            />
             <Input
               label={`Unit Cost (${taxCurr.currencySymbol})`}
               type="number"
@@ -333,12 +593,35 @@ export const InventoryModule: React.FC = () => {
               onChange={(e) => setCost(e.target.value)}
             />
           </div>
-          <Input label="Supplier" value={supplier} onChange={(e) => setSupplier(e.target.value)} />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Input
+              label="Supplier Name"
+              value={supplier}
+              onChange={(e) => setSupplier(e.target.value)}
+            />
+            <Input
+              label="Supplier Contact (Phone / Email)"
+              value={supplierContact}
+              onChange={(e) => setSupplierContact(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Input
+              label="Supplier SKU / Code"
+              value={supplierSku}
+              onChange={(e) => setSupplierSku(e.target.value)}
+            />
+            <Input
+              label="Storage Location (Rack / Shelf)"
+              value={storageLocation}
+              onChange={(e) => setStorageLocation(e.target.value)}
+            />
+          </div>
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" type="button" onClick={() => setAddOpen(false)}>
+            <Button variant="secondary" type="button" onClick={() => setItemModalOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit">Save Item</Button>
+            <Button type="submit">{editingItem ? 'Save Changes' : 'Save Item'}</Button>
           </div>
         </form>
       </Modal>
@@ -349,7 +632,9 @@ export const InventoryModule: React.FC = () => {
         onClose={() => setAdjustTarget(null)}
         title={adjustTarget ? `Adjust Stock · ${adjustTarget.name}` : ''}
         subtitle={
-          adjustTarget ? `Current on hand: ${adjustTarget.quantityOnHand} ${adjustTarget.unit}` : ''
+          adjustTarget
+            ? `On hand: ${adjustTarget.quantityOnHand} ${adjustTarget.unit} · Reorder level: ${adjustTarget.reorderLevel}`
+            : ''
         }
         maxWidth="sm"
       >
@@ -357,9 +642,10 @@ export const InventoryModule: React.FC = () => {
           <Select
             label="Movement Type"
             value={movementType}
-            onChange={(e) => setMovementType(e.target.value as StockMovement['movementType'])}
+            onChange={(e) => setMovementType(e.target.value as StockMovementType)}
             options={[
               { value: 'purchase', label: 'Purchase / Restock (+)' },
+              { value: 'job_usage', label: 'Print Job Usage (-)' },
               { value: 'adjustment', label: 'Manual Adjustment (+/-)' },
               { value: 'wastage', label: 'Production Wastage (-)' },
               { value: 'damaged', label: 'Damaged Stock (-)' },
@@ -375,8 +661,14 @@ export const InventoryModule: React.FC = () => {
             required
           />
           <Input
-            label="Reason / Reference"
-            placeholder="e.g. PO #1024 or Misprint wastage"
+            label="Reference # (PO / Job / Receipt)"
+            placeholder="e.g. PO-2026-042 or JO-261124-102"
+            value={reference}
+            onChange={(e) => setReference(e.target.value)}
+          />
+          <Input
+            label="Reason / Notes"
+            placeholder="e.g. Monthly delivery or misprint wastage"
             value={note}
             onChange={(e) => setNote(e.target.value)}
           />

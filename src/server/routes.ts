@@ -25,9 +25,18 @@ import type {
   PrintService,
   ProductionStatus,
   ServiceCategory,
+  StockMovement,
+  StockMovementType,
+  SupplyCategory,
   Transaction,
 } from '../shared/types.ts';
 import { DEFAULT_SETTINGS } from '../shared/defaults.ts';
+import {
+  computeSignedStockDelta,
+  inferReferenceType,
+  validateInventoryItemInput,
+  validateStockMovementInput,
+} from '../shared/inventoryModel.ts';
 
 export const apiRouter = express.Router();
 
@@ -42,6 +51,78 @@ function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function mapInventoryItemRow(i: Record<string, unknown>): InventoryItem {
+  const reorderLevel = Number(i.reorder_level) || 0;
+  const supplier = String(i.supplier || '');
+  const supplierContact = String(i.supplier_contact || '');
+  const supplierSku = String(i.supplier_sku || '');
+  const leadTimeDays = Number(i.lead_time_days) || 0;
+
+  return {
+    id: String(i.id),
+    sku: String(i.sku),
+    barcode: String(i.barcode || ''),
+    name: String(i.name),
+    categoryId: i.category_id ? String(i.category_id) : undefined,
+    category: String(i.category),
+    itemType: i.item_type as InventoryItem['itemType'],
+    unit: String(i.unit),
+    quantityOnHand: Number(i.quantity_on_hand) || 0,
+    reservedQuantity: Number(i.reserved_quantity) || 0,
+    reorderLevel,
+    reorderQuantity: Number(i.reorder_quantity) || Math.max(reorderLevel * 2, 0),
+    unitCost: Number(i.unit_cost) || 0,
+    supplier,
+    supplierContact,
+    supplierSku,
+    leadTimeDays,
+    supplierInfo: supplier
+      ? {
+          name: supplier,
+          contact: supplierContact,
+          supplierSku,
+          leadTimeDays,
+        }
+      : undefined,
+    storageLocation: String(i.storage_location || ''),
+    lastRestockedAt: i.last_restocked_at ? String(i.last_restocked_at) : null,
+    isDemo: i.is_demo === 1,
+    createdAt: i.created_at ? String(i.created_at) : String(i.updated_at),
+    updatedAt: String(i.updated_at),
+  };
+}
+
+function mapStockMovementRow(m: Record<string, unknown>): StockMovement {
+  const delta = Number(m.quantity_delta) || 0;
+  const balanceAfter = Number(m.balance_after) || 0;
+  const quantityBefore =
+    m.quantity_before !== undefined && m.quantity_before !== null
+      ? Number(m.quantity_before) || 0
+      : Math.max(0, Number((balanceAfter - delta).toFixed(2)));
+  const movementType = (String(m.movement_type || 'adjustment') as StockMovementType);
+  const createdAt = String(m.created_at);
+
+  return {
+    id: String(m.id),
+    inventoryItemId: String(m.inventory_item_id),
+    itemName: String(m.item_name),
+    movementType,
+    quantityBefore,
+    quantityDelta: delta,
+    balanceAfter,
+    unitCostAtMovement: Number(m.unit_cost_at_movement) || 0,
+    referenceType: (m.reference_type
+      ? String(m.reference_type)
+      : inferReferenceType(movementType)) as StockMovement['referenceType'],
+    reference: String(m.reference || ''),
+    performedById: String(m.performed_by_id || ''),
+    performedBy: String(m.performed_by),
+    note: String(m.note || ''),
+    occurredAt: m.occurred_at ? String(m.occurred_at) : createdAt,
+    createdAt,
+  };
 }
 
 function mapServiceRow(row: Record<string, unknown>): PrintService {
@@ -407,41 +488,30 @@ apiRouter.get('/bootstrap', requireAuth, (_req, res) => {
     >
   ).map(mapServiceRow);
 
+  const supplyCategories: SupplyCategory[] = (
+    db.prepare('SELECT * FROM supply_categories ORDER BY sort_order ASC, name ASC').all() as Array<
+      Record<string, unknown>
+    >
+  ).map((sc) => ({
+    id: String(sc.id),
+    name: String(sc.name),
+    description: String(sc.description || ''),
+    defaultUnit: String(sc.default_unit || 'pc'),
+    sortOrder: Number(sc.sort_order) || 0,
+    isDemo: sc.is_demo === 1,
+  }));
+
   const inventory = (
     db.prepare('SELECT * FROM inventory_items ORDER BY name ASC').all() as Array<
       Record<string, unknown>
     >
-  ).map((i) => ({
-    id: String(i.id),
-    sku: String(i.sku),
-    name: String(i.name),
-    category: String(i.category),
-    itemType: i.item_type as InventoryItem['itemType'],
-    unit: String(i.unit),
-    quantityOnHand: Number(i.quantity_on_hand) || 0,
-    reorderLevel: Number(i.reorder_level) || 0,
-    unitCost: Number(i.unit_cost) || 0,
-    supplier: String(i.supplier || ''),
-    isDemo: i.is_demo === 1,
-    updatedAt: String(i.updated_at),
-  }));
+  ).map(mapInventoryItemRow);
 
   const stockMovements = (
     db.prepare('SELECT * FROM stock_movements ORDER BY created_at DESC LIMIT 200').all() as Array<
       Record<string, unknown>
     >
-  ).map((m) => ({
-    id: String(m.id),
-    inventoryItemId: String(m.inventory_item_id),
-    itemName: String(m.item_name),
-    movementType: m.movement_type,
-    quantityDelta: Number(m.quantity_delta) || 0,
-    balanceAfter: Number(m.balance_after) || 0,
-    reference: String(m.reference || ''),
-    performedBy: String(m.performed_by),
-    note: String(m.note || ''),
-    createdAt: String(m.created_at),
-  }));
+  ).map(mapStockMovementRow);
 
   const customers = (
     db.prepare('SELECT * FROM customers ORDER BY name ASC').all() as Array<Record<string, unknown>>
@@ -533,6 +603,7 @@ apiRouter.get('/bootstrap', requireAuth, (_req, res) => {
   res.json({
     settings,
     categories,
+    supplyCategories,
     services,
     inventory,
     stockMovements,
@@ -811,12 +882,13 @@ function applyTransactionCreation(
           const deductQty = Number((binding.quantityPerUnit * item.effectiveQuantity).toFixed(2));
           if (deductQty <= 0) continue;
           const invRow = db
-            .prepare('SELECT id, name, quantity_on_hand FROM inventory_items WHERE id = ?')
+            .prepare('SELECT id, name, quantity_on_hand, unit_cost FROM inventory_items WHERE id = ?')
             .get(binding.inventoryItemId) as
-            | { id: string; name: string; quantity_on_hand: number }
+            | { id: string; name: string; quantity_on_hand: number; unit_cost: number }
             | undefined;
           if (invRow) {
-            const nextQty = Math.max(0, Number((invRow.quantity_on_hand - deductQty).toFixed(2)));
+            const qtyBefore = Number(invRow.quantity_on_hand) || 0;
+            const nextQty = Math.max(0, Number((qtyBefore - deductQty).toFixed(2)));
             db.prepare('UPDATE inventory_items SET quantity_on_hand = ?, updated_at = ? WHERE id = ?').run(
               nextQty,
               now,
@@ -824,17 +896,23 @@ function applyTransactionCreation(
             );
             db.prepare(`
               INSERT INTO stock_movements (
-                id, inventory_item_id, item_name, movement_type, quantity_delta, balance_after, reference, performed_by, note, created_at
-              ) VALUES (?, ?, ?, 'sale_deduction', ?, ?, ?, ?, ?, ?)
+                id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
+                balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
+                performed_by, note, occurred_at, created_at
+              ) VALUES (?, ?, ?, 'sale_deduction', ?, ?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?)
             `).run(
               genId('mov'),
               invRow.id,
               invRow.name,
+              qtyBefore,
               -deductQty,
               nextQty,
+              Number(invRow.unit_cost) || 0,
               receiptNumber,
+              actorId,
               actorName,
               `Auto-deducted for ${item.serviceName}`,
+              now,
               now,
             );
           }
@@ -1142,94 +1220,323 @@ apiRouter.patch('/print-jobs/:id', requireAuth, (req: AuthenticatedRequest, res)
 
 // ---------- INVENTORY ----------
 
+apiRouter.get('/inventory', requireAuth, (_req, res) => {
+  const supplyCategories: SupplyCategory[] = (
+    db.prepare('SELECT * FROM supply_categories ORDER BY sort_order ASC, name ASC').all() as Array<
+      Record<string, unknown>
+    >
+  ).map((sc) => ({
+    id: String(sc.id),
+    name: String(sc.name),
+    description: String(sc.description || ''),
+    defaultUnit: String(sc.default_unit || 'pc'),
+    sortOrder: Number(sc.sort_order) || 0,
+    isDemo: sc.is_demo === 1,
+  }));
+
+  const items = (
+    db.prepare('SELECT * FROM inventory_items ORDER BY name ASC').all() as Array<
+      Record<string, unknown>
+    >
+  ).map(mapInventoryItemRow);
+
+  const stockMovements = (
+    db.prepare('SELECT * FROM stock_movements ORDER BY created_at DESC LIMIT 200').all() as Array<
+      Record<string, unknown>
+    >
+  ).map(mapStockMovementRow);
+
+  res.json({
+    items,
+    stockMovements,
+    supplyCategories,
+    serverTime: new Date().toISOString(),
+  });
+});
+
 apiRouter.post(
   '/inventory',
   requireAuth,
   requireRole(['admin', 'manager']),
   (req: AuthenticatedRequest, res) => {
     const i = req.body as Partial<InventoryItem>;
-    if (!i.name || !i.unit) {
-      return res.status(400).json({ error: 'Item name and unit are required.' });
+    const validation = validateInventoryItemInput(i);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
     const id = genId('inv');
     const now = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO inventory_items (
-        id, sku, name, category, item_type, unit, quantity_on_hand, reorder_level, unit_cost, supplier, is_demo, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-    `).run(
-      id,
-      i.sku || `MAT-${Date.now().toString().slice(-4)}`,
-      i.name,
-      i.category || 'Supplies',
-      i.itemType || 'consumable',
-      i.unit,
-      Number(i.quantityOnHand) || 0,
-      Number(i.reorderLevel) || 0,
-      Number(i.unitCost) || 0,
-      i.supplier || '',
-      now,
-    );
-    const created = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<string, unknown>;
-    res.status(201).json({
-      id: String(created.id),
-      sku: String(created.sku),
-      name: String(created.name),
-      category: String(created.category),
-      itemType: created.item_type,
-      unit: String(created.unit),
-      quantityOnHand: Number(created.quantity_on_hand),
-      reorderLevel: Number(created.reorder_level),
-      unitCost: Number(created.unit_cost),
-      supplier: String(created.supplier),
-      isDemo: false,
-      updatedAt: String(created.updated_at),
+    const initialQty = Math.max(0, Number(i.quantityOnHand) || 0);
+    const reorderLevel = Math.max(0, Number(i.reorderLevel) || 0);
+    const reorderQuantity =
+      i.reorderQuantity !== undefined
+        ? Math.max(0, Number(i.reorderQuantity) || 0)
+        : Math.max(reorderLevel * 2, 0);
+    const unitCost = Math.max(0, Number(i.unitCost) || 0);
+    const itemName = i.name!.trim();
+
+    const supplierName = (i.supplier ?? i.supplierInfo?.name ?? '').trim();
+    const supplierContact = (i.supplierContact ?? i.supplierInfo?.contact ?? '').trim();
+    const supplierSku = (i.supplierSku ?? i.supplierInfo?.supplierSku ?? '').trim();
+    const leadTimeDays = Math.max(0, Number(i.leadTimeDays ?? i.supplierInfo?.leadTimeDays) || 0);
+
+    const run = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO inventory_items (
+          id, sku, barcode, name, category_id, category, item_type, unit, quantity_on_hand, reserved_quantity,
+          reorder_level, reorder_quantity, unit_cost, supplier, supplier_contact, supplier_sku,
+          lead_time_days, storage_location, last_restocked_at, is_demo, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      `).run(
+        id,
+        (i.sku || '').trim() || `MAT-${Date.now().toString().slice(-4)}`,
+        (i.barcode || '').trim(),
+        itemName,
+        (i.categoryId || '').trim(),
+        (i.category || 'Supplies').trim(),
+        i.itemType === 'finished_product' ? 'finished_product' : 'consumable',
+        i.unit!.trim(),
+        initialQty,
+        Math.max(0, Number(i.reservedQuantity) || 0),
+        reorderLevel,
+        reorderQuantity,
+        unitCost,
+        supplierName,
+        supplierContact,
+        supplierSku,
+        leadTimeDays,
+        (i.storageLocation || '').trim(),
+        initialQty > 0 ? now : null,
+        now,
+        now,
+      );
+
+      if (initialQty > 0) {
+        db.prepare(`
+          INSERT INTO stock_movements (
+            id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
+            balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
+            performed_by, note, occurred_at, created_at
+          ) VALUES (?, ?, ?, 'initial_stock', 0, ?, ?, ?, 'system', 'INIT', ?, ?, 'Initial opening stock balance', ?, ?)
+        `).run(
+          genId('mov'),
+          id,
+          itemName,
+          initialQty,
+          initialQty,
+          unitCost,
+          req.authUser!.id,
+          req.authUser!.fullName,
+          now,
+          now,
+        );
+      }
     });
+    run();
+
+    const created = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<string, unknown>;
+    res.status(201).json(mapInventoryItemRow(created));
   },
 );
 
-apiRouter.post('/inventory/:id/adjust', requireAuth, (req: AuthenticatedRequest, res) => {
-  const id = String(req.params.id);
-  const { movementType, quantityDelta, note, reference } = req.body || {};
-  const existing = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
-  if (!existing) return res.status(404).json({ error: 'Inventory item not found.' });
+apiRouter.patch(
+  '/inventory/:id',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const id = String(req.params.id);
+    const existing = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!existing) {
+      return res.status(404).json({ error: 'Inventory item not found.' });
+    }
+    const patch = req.body as Partial<InventoryItem>;
+    const now = new Date().toISOString();
 
-  const delta = Number(quantityDelta) || 0;
-  if (delta === 0) return res.status(400).json({ error: 'Quantity change must be non-zero.' });
+    const nextSupplier =
+      patch.supplier !== undefined
+        ? String(patch.supplier).trim()
+        : patch.supplierInfo?.name !== undefined
+          ? String(patch.supplierInfo.name).trim()
+          : String(existing.supplier || '');
+    const nextSupplierContact =
+      patch.supplierContact !== undefined
+        ? String(patch.supplierContact).trim()
+        : patch.supplierInfo?.contact !== undefined
+          ? String(patch.supplierInfo.contact).trim()
+          : String(existing.supplier_contact || '');
+    const nextSupplierSku =
+      patch.supplierSku !== undefined
+        ? String(patch.supplierSku).trim()
+        : patch.supplierInfo?.supplierSku !== undefined
+          ? String(patch.supplierInfo.supplierSku).trim()
+          : String(existing.supplier_sku || '');
+    const nextLeadTime =
+      patch.leadTimeDays !== undefined
+        ? Math.max(0, Number(patch.leadTimeDays) || 0)
+        : patch.supplierInfo?.leadTimeDays !== undefined
+          ? Math.max(0, Number(patch.supplierInfo.leadTimeDays) || 0)
+          : Number(existing.lead_time_days) || 0;
 
-  const signedDelta =
-    movementType === 'wastage' || movementType === 'damaged' ? -Math.abs(delta) : delta;
-  const nextQty = Math.max(0, Number(((Number(existing.quantity_on_hand) || 0) + signedDelta).toFixed(2)));
-  const now = new Date().toISOString();
-
-  const run = db.transaction(() => {
-    db.prepare('UPDATE inventory_items SET quantity_on_hand = ?, updated_at = ? WHERE id = ?').run(
-      nextQty,
+    db.prepare(`
+      UPDATE inventory_items
+      SET sku = ?, barcode = ?, name = ?, category_id = ?, category = ?, item_type = ?, unit = ?,
+          reserved_quantity = ?, reorder_level = ?, reorder_quantity = ?, unit_cost = ?,
+          supplier = ?, supplier_contact = ?, supplier_sku = ?, lead_time_days = ?,
+          storage_location = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      patch.sku !== undefined ? String(patch.sku).trim() : String(existing.sku),
+      patch.barcode !== undefined ? String(patch.barcode).trim() : String(existing.barcode || ''),
+      patch.name !== undefined ? String(patch.name).trim() : String(existing.name),
+      patch.categoryId !== undefined
+        ? String(patch.categoryId).trim()
+        : String(existing.category_id || ''),
+      patch.category !== undefined ? String(patch.category).trim() : String(existing.category),
+      patch.itemType === 'finished_product' || patch.itemType === 'consumable'
+        ? patch.itemType
+        : String(existing.item_type),
+      patch.unit !== undefined ? String(patch.unit).trim() : String(existing.unit),
+      patch.reservedQuantity !== undefined
+        ? Math.max(0, Number(patch.reservedQuantity) || 0)
+        : Number(existing.reserved_quantity) || 0,
+      patch.reorderLevel !== undefined
+        ? Math.max(0, Number(patch.reorderLevel) || 0)
+        : Number(existing.reorder_level) || 0,
+      patch.reorderQuantity !== undefined
+        ? Math.max(0, Number(patch.reorderQuantity) || 0)
+        : Number(existing.reorder_quantity) || 0,
+      patch.unitCost !== undefined
+        ? Math.max(0, Number(patch.unitCost) || 0)
+        : Number(existing.unit_cost) || 0,
+      nextSupplier,
+      nextSupplierContact,
+      nextSupplierSku,
+      nextLeadTime,
+      patch.storageLocation !== undefined
+        ? String(patch.storageLocation).trim()
+        : String(existing.storage_location || ''),
       now,
       id,
     );
+
+    const updated = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<string, unknown>;
+    res.json(mapInventoryItemRow(updated));
+  },
+);
+
+function applyInventoryAdjustment(
+  id: string,
+  payload: {
+    movementType?: StockMovementType;
+    quantityDelta?: number;
+    note?: string;
+    reference?: string;
+    referenceType?: StockMovement['referenceType'];
+    occurredAt?: string;
+  },
+  actorId: string,
+  actorName: string,
+) {
+  const existing = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as
+    | Record<string, unknown>
+    | undefined;
+  if (!existing) {
+    throw Object.assign(new Error('Inventory item not found.'), { statusCode: 404 });
+  }
+
+  const resolvedMovementType: StockMovementType = (payload.movementType ||
+    'adjustment') as StockMovementType;
+  const validation = validateStockMovementInput({
+    movementType: resolvedMovementType,
+    quantityDelta: Number(payload.quantityDelta) || 0,
+  });
+  if (!validation.valid) {
+    throw Object.assign(new Error(validation.error), { statusCode: 400 });
+  }
+
+  const signedDelta = computeSignedStockDelta(
+    resolvedMovementType,
+    Number(payload.quantityDelta) || 0,
+  );
+  const qtyBefore = Number(existing.quantity_on_hand) || 0;
+  const nextQty = Math.max(0, Number((qtyBefore + signedDelta).toFixed(2)));
+  const now = new Date().toISOString();
+  const effectiveTimestamp =
+    typeof payload.occurredAt === 'string' && payload.occurredAt ? payload.occurredAt : now;
+  const restockedAt =
+    signedDelta > 0 && (resolvedMovementType === 'purchase' || resolvedMovementType === 'return')
+      ? effectiveTimestamp
+      : existing.last_restocked_at
+        ? String(existing.last_restocked_at)
+        : null;
+
+  const movementId = genId('mov');
+  const resolvedRefType = payload.referenceType || inferReferenceType(resolvedMovementType);
+
+  const run = db.transaction(() => {
+    db.prepare(
+      'UPDATE inventory_items SET quantity_on_hand = ?, last_restocked_at = ?, updated_at = ? WHERE id = ?',
+    ).run(nextQty, restockedAt, now, id);
     db.prepare(`
       INSERT INTO stock_movements (
-        id, inventory_item_id, item_name, movement_type, quantity_delta, balance_after, reference, performed_by, note, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
+        balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
+        performed_by, note, occurred_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      genId('mov'),
+      movementId,
       id,
       String(existing.name),
-      movementType || 'adjustment',
+      resolvedMovementType,
+      qtyBefore,
       signedDelta,
       nextQty,
-      reference || '',
-      req.authUser!.fullName,
-      note || '',
+      Number(existing.unit_cost) || 0,
+      resolvedRefType,
+      payload.reference || '',
+      actorId,
+      actorName,
+      payload.note || '',
+      effectiveTimestamp,
       now,
     );
   });
   run();
 
-  res.json({ id, quantityOnHand: nextQty, updatedAt: now });
+  const updatedRow = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<
+    string,
+    unknown
+  >;
+  const movementRow = db.prepare('SELECT * FROM stock_movements WHERE id = ?').get(movementId) as Record<
+    string,
+    unknown
+  >;
+
+  return {
+    id,
+    quantityOnHand: nextQty,
+    lastRestockedAt: restockedAt,
+    updatedAt: now,
+    item: mapInventoryItemRow(updatedRow),
+    movement: mapStockMovementRow(movementRow),
+  };
+}
+
+apiRouter.post('/inventory/:id/adjust', requireAuth, (req: AuthenticatedRequest, res) => {
+  try {
+    const result = applyInventoryAdjustment(
+      String(req.params.id),
+      req.body || {},
+      req.authUser!.id,
+      req.authUser!.fullName,
+    );
+    res.json(result);
+  } catch (err) {
+    const status = (err as { statusCode?: number })?.statusCode || 400;
+    res.status(status).json({ error: err instanceof Error ? err.message : 'Stock adjustment failed.' });
+  }
 });
 
 // ---------- CUSTOMERS ----------
@@ -1477,6 +1784,26 @@ apiRouter.post('/sync/batch', requireAuth, (req: AuthenticatedRequest, res) => {
         results.push({
           clientMutationId: mut.clientMutationId,
           status: out.duplicate ? 'duplicate' : 'applied',
+        });
+      } else if (mut.type === 'ADJUST_INVENTORY') {
+        const adj = mut.payload as {
+          inventoryItemId: string;
+          movementType?: StockMovementType;
+          quantityDelta?: number;
+          note?: string;
+          reference?: string;
+          referenceType?: StockMovement['referenceType'];
+          occurredAt?: string;
+        };
+        applyInventoryAdjustment(
+          adj.inventoryItemId,
+          adj,
+          req.authUser!.id,
+          req.authUser!.fullName,
+        );
+        results.push({
+          clientMutationId: mut.clientMutationId,
+          status: 'applied',
         });
       } else {
         results.push({
