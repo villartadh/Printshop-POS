@@ -8,6 +8,7 @@ export type InventorySortField =
   | 'currentStock'
   | 'reorderLevel'
   | 'reorderThreshold'
+  | 'minimumThreshold'
   | 'unitCost'
   | 'status'
   | 'sortOrder'
@@ -59,6 +60,8 @@ export interface InventoryItem {
   reorderLevel: number;
   /** Alias for reorderLevel representing reorder threshold */
   reorderThreshold?: number;
+  /** Critical minimum stock threshold; falling below triggers red alert highlighting */
+  minimumThreshold?: number;
   /** Recommended restock quantity when ordering from supplier */
   reorderQuantity?: number;
   unitCost: number;
@@ -126,6 +129,7 @@ export interface StockMovement {
 export interface StockAdjustmentPayload {
   movementType: StockMovementType;
   quantityDelta: number;
+  unitCost?: number;
   note: string;
   reference?: string;
   referenceType?: StockMovementReferenceType;
@@ -139,4 +143,14 @@ export interface InventoryStockFilter {
   itemType?: InventoryItemType | 'all';
   sortBy?: InventorySortField;
   sortDir?: InventorySortDirection;
+}
+
+export interface BulkInventoryUpdatePayload {
+  ids: string[];
+  categoryId?: string;
+  category?: string;
+  supplier?: string;
+  supplierContact?: string;
+  supplierSku?: string;
+  leadTimeDays?: number;
 }

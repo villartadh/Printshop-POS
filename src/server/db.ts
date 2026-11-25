@@ -113,6 +113,7 @@ export function initDatabase() {
       quantity_on_hand REAL NOT NULL DEFAULT 0,
       reserved_quantity REAL NOT NULL DEFAULT 0,
       reorder_level REAL NOT NULL DEFAULT 0,
+      minimum_threshold REAL NOT NULL DEFAULT 0,
       reorder_quantity REAL NOT NULL DEFAULT 0,
       unit_cost REAL NOT NULL DEFAULT 0,
       supplier TEXT NOT NULL DEFAULT '',
@@ -269,6 +270,7 @@ export function initDatabase() {
   ensureColumn('inventory_items', 'barcode', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('inventory_items', 'category_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('inventory_items', 'reserved_quantity', 'REAL NOT NULL DEFAULT 0');
+  ensureColumn('inventory_items', 'minimum_threshold', 'REAL NOT NULL DEFAULT 0');
   ensureColumn('inventory_items', 'reorder_quantity', 'REAL NOT NULL DEFAULT 0');
   ensureColumn('inventory_items', 'supplier_contact', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('inventory_items', 'supplier_sku', "TEXT NOT NULL DEFAULT ''");
@@ -336,9 +338,9 @@ export function seedDemoDataset() {
     const insertInv = db.prepare(`
       INSERT OR IGNORE INTO inventory_items (
         id, sku, barcode, name, category_id, category, item_type, unit, quantity_on_hand, reserved_quantity,
-        reorder_level, reorder_quantity, unit_cost, supplier, supplier_contact, supplier_sku,
+        reorder_level, minimum_threshold, reorder_quantity, unit_cost, supplier, supplier_contact, supplier_sku,
         lead_time_days, storage_location, last_restocked_at, is_demo, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `);
     for (const inv of DEMO_INVENTORY) {
       insertInv.run(
@@ -353,6 +355,7 @@ export function seedDemoDataset() {
         inv.quantityOnHand,
         inv.reservedQuantity || 0,
         inv.reorderLevel,
+        inv.minimumThreshold || 0,
         inv.reorderQuantity || 0,
         inv.unitCost,
         inv.supplier,

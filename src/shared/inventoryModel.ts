@@ -44,6 +44,15 @@ export function isLowStockItem(
   return (Number(item.quantityOnHand) || 0) <= (Number(item.reorderLevel) || 0);
 }
 
+export function isBelowMinimumThreshold(
+  item: Pick<InventoryItem, 'quantityOnHand' | 'currentStock' | 'minimumThreshold'>,
+): boolean {
+  const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
+  if (minThreshold <= 0) return false;
+  const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
+  return stockCount < minThreshold;
+}
+
 export function getSuggestedRestockQuantity(
   item: Pick<InventoryItem, 'quantityOnHand' | 'reorderLevel' | 'reorderQuantity'>,
 ): number {
@@ -183,6 +192,7 @@ export function normalizeInventoryItem(
   const now = new Date().toISOString();
   const quantityOnHand = Math.max(0, Number(raw.quantityOnHand ?? raw.currentStock) || 0);
   const reorderLevel = Math.max(0, Number(raw.reorderLevel ?? raw.reorderThreshold) || 0);
+  const minimumThreshold = Math.max(0, Number(raw.minimumThreshold) || 0);
   const details = raw.supplierDetails ?? raw.supplierInfo;
   const supplierName = (raw.supplier ?? details?.name ?? '').trim();
   const supplierContact = (raw.supplierContact ?? details?.contact ?? '').trim();
@@ -211,6 +221,7 @@ export function normalizeInventoryItem(
     reservedQuantity: Math.max(0, Number(raw.reservedQuantity) || 0),
     reorderLevel,
     reorderThreshold: reorderLevel,
+    minimumThreshold,
     reorderQuantity:
       raw.reorderQuantity !== undefined
         ? Math.max(0, Number(raw.reorderQuantity) || 0)
@@ -279,6 +290,9 @@ export function validateInventoryItemInput(
   const thresholdVal = input.reorderLevel ?? input.reorderThreshold;
   if (thresholdVal !== undefined && Number(thresholdVal) < 0) {
     return { valid: false, error: 'Reorder level cannot be negative.' };
+  }
+  if (input.minimumThreshold !== undefined && Number(input.minimumThreshold) < 0) {
+    return { valid: false, error: 'Minimum threshold cannot be negative.' };
   }
   if (input.unitCost !== undefined && Number(input.unitCost) < 0) {
     return { valid: false, error: 'Unit cost cannot be negative.' };

@@ -12,6 +12,7 @@ import { formatCurrency } from '../../shared/pricingEngine.ts';
 import type { Transaction } from '../../shared/types.ts';
 import { Button, Card, StatusIndicator } from '../../components/ui/Primitives.tsx';
 import { BreakdownBarList, SalesTrendChart } from '../../components/ui/Charts.tsx';
+import { InventorySupplierChart } from '../../components/dashboard/InventorySupplierChart.tsx';
 import { DataTable } from '../../components/ui/DataTable.tsx';
 import { Modal } from '../../components/ui/Overlays.tsx';
 import { ReceiptModal } from '../receipts/ReceiptModal.tsx';
@@ -382,6 +383,18 @@ export const DashboardModule: React.FC = () => {
                   ))}
                 </div>
               )}
+            </Card>
+          );
+        }
+
+        if (widget.id === 'inventory_by_supplier') {
+          return (
+            <Card key={widget.id}>
+              <InventorySupplierChart
+                items={inventory}
+                taxCurrency={taxCurr}
+                onManageInventory={() => setActiveModule('inventory')}
+              />
             </Card>
           );
         }

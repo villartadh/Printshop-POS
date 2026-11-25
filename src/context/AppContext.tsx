@@ -5,6 +5,7 @@ import type {
   AuditLogEntry,
   AuthSession,
   BrandingConfig,
+  BulkInventoryUpdatePayload,
   CashierShift,
   Customer,
   DesignTokens,
@@ -181,6 +182,7 @@ interface AppContextValue {
   loadInventory: () => Promise<InventoryItem[]>;
   createInventoryItem: (item: Partial<InventoryItem>) => Promise<InventoryItem>;
   updateInventoryItem: (id: string, patch: Partial<InventoryItem>) => Promise<InventoryItem>;
+  bulkUpdateInventoryItems: (payload: BulkInventoryUpdatePayload) => Promise<InventoryItem[]>;
   deleteInventoryItem: (id: string) => Promise<void>;
   trackStockChange: (id: string, payload: StockAdjustmentPayload) => Promise<StockMovement>;
   adjustInventory: (
@@ -730,6 +732,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return normalized;
   };
 
+  const bulkUpdateInventoryItems = async (
+    payload: BulkInventoryUpdatePayload,
+  ): Promise<InventoryItem[]> => {
+    const res = await apiRequest<{ items: InventoryItem[]; updatedCount: number }>(
+      '/api/inventory/bulk',
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+    );
+    const normalizedList = (res.items || []).map((item) => normalizeInventoryItem(item));
+    const updatedMap = new Map(normalizedList.map((item) => [item.id, item]));
+    const nextItems = inventory.map((item) => updatedMap.get(item.id) ?? item);
+    setInventory(nextItems);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        inventory: nextItems,
+      });
+    }
+
+    notify(`Updated ${normalizedList.length} inventory item(s).`, 'success');
+    return normalizedList;
+  };
+
   const deleteInventoryItem = async (id: string): Promise<void> => {
     const target = inventory.find((item) => item.id === id);
     await apiRequest<{ ok: boolean; id: string }>(`/api/inventory/${id}`, {
@@ -787,9 +816,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? occurredAt
           : target.lastRestockedAt ?? null;
 
+      const hasCustomUnitCost =
+        payload.unitCost !== undefined &&
+        Number.isFinite(Number(payload.unitCost)) &&
+        Number(payload.unitCost) >= 0;
+      const movementUnitCost = hasCustomUnitCost
+        ? Number(Number(payload.unitCost).toFixed(2))
+        : target.unitCost;
+      const nextItemUnitCost =
+        hasCustomUnitCost &&
+        (payload.movementType === 'purchase' || payload.movementType === 'initial_stock')
+          ? movementUnitCost
+          : target.unitCost;
+
       const updatedItem = normalizeInventoryItem({
         ...target,
         quantityOnHand: nextQty,
+        unitCost: nextItemUnitCost,
         lastRestockedAt: restockedAt,
         updatedAt: now,
       });
@@ -801,7 +844,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         quantityBefore: qtyBefore,
         quantityDelta: signedDelta,
         balanceAfter: nextQty,
-        unitCostAtMovement: target.unitCost,
+        unitCostAtMovement: movementUnitCost,
         referenceType: payload.referenceType || inferReferenceType(payload.movementType),
         reference: payload.reference || '',
         performedById: session?.user.id || '',
@@ -1057,6 +1100,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     loadInventory,
     createInventoryItem,
     updateInventoryItem,
+    bulkUpdateInventoryItems,
     deleteInventoryItem,
     trackStockChange,
     adjustInventory,

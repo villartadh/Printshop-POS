@@ -4,10 +4,13 @@ import { EmptyState } from './Overlays.tsx';
 
 export interface DataTableColumn<T> {
   key: string;
-  label: string;
+  label: React.ReactNode;
   align?: 'left' | 'right';
   sortable?: boolean;
   hideOnMobile?: boolean;
+  headerClassName?: string;
+  cellClassName?: string;
+  stopRowClick?: boolean;
   render: (row: T) => React.ReactNode;
 }
 
@@ -64,7 +67,7 @@ export function DataTable<T>({
                 key={col.key}
                 className={`px-3.5 py-2.5 text-xs font-semibold text-[var(--pos-text-muted)] whitespace-nowrap ${
                   col.align === 'right' ? 'text-right' : 'text-left'
-                } ${col.hideOnMobile ? 'hidden md:table-cell' : ''}`}
+                } ${col.hideOnMobile ? 'hidden md:table-cell' : ''} ${col.headerClassName || ''}`}
               >
                 {col.sortable && onSortChange ? (
                   <button
@@ -104,9 +107,10 @@ export function DataTable<T>({
               {columns.map((col) => (
                 <td
                   key={col.key}
+                  onClick={col.stopRowClick ? (e) => e.stopPropagation() : undefined}
                   className={`px-3.5 py-2.5 align-middle ${
                     col.align === 'right' ? 'text-right tabular-nums' : 'text-left'
-                  } ${col.hideOnMobile ? 'hidden md:table-cell' : ''}`}
+                  } ${col.hideOnMobile ? 'hidden md:table-cell' : ''} ${col.cellClassName || ''}`}
                 >
                   {col.render(row)}
                 </td>

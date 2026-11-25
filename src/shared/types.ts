@@ -379,6 +379,7 @@ export interface PrintJob {
 }
 
 export type {
+  BulkInventoryUpdatePayload,
   InventoryItem,
   InventoryItemType,
   InventorySortConfig,

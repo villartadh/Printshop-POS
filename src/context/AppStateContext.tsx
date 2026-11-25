@@ -75,10 +75,19 @@ export function mergeSettingsWithDefaults(
       ...DEFAULT_SETTINGS.posLayout,
       ...(raw.posLayout && typeof raw.posLayout === 'object' ? raw.posLayout : {}),
     },
-    dashboardWidgets:
-      Array.isArray(raw.dashboardWidgets) && raw.dashboardWidgets.length > 0
-        ? raw.dashboardWidgets
-        : DEFAULT_SETTINGS.dashboardWidgets,
+    dashboardWidgets: (() => {
+      const base =
+        Array.isArray(raw.dashboardWidgets) && raw.dashboardWidgets.length > 0
+          ? raw.dashboardWidgets.map((w) => ({ ...w }))
+          : DEFAULT_SETTINGS.dashboardWidgets.map((w) => ({ ...w }));
+      const existingIds = new Set(base.map((w) => w.id));
+      for (const defWidget of DEFAULT_SETTINGS.dashboardWidgets) {
+        if (!existingIds.has(defWidget.id)) {
+          base.push({ ...defWidget, order: base.length });
+        }
+      }
+      return base;
+    })(),
     receiptTemplate: {
       ...DEFAULT_SETTINGS.receiptTemplate,
       ...(raw.receiptTemplate && typeof raw.receiptTemplate === 'object'

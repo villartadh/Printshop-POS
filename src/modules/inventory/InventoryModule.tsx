@@ -1,13 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, ArrowUpDown, Edit2, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import {
-  extractSupplierInfo,
   filterInventoryItems,
-  getAvailableStock,
   getInventoryStockStatus,
   getSuggestedRestockQuantity,
+  isBelowMinimumThreshold,
   STOCK_MOVEMENT_LABELS,
 } from '../../shared/inventoryModel.ts';
 import type {
@@ -26,6 +25,7 @@ import {
   type InventoryItemFormValues,
 } from '../../components/inventory/InventoryItemDialog.tsx';
 import { InventoryTable } from '../../components/inventory/InventoryTable.tsx';
+import { StockMovementModal } from '../../components/inventory/StockMovementModal.tsx';
 
 type InventoryTab = 'items' | 'low_stock' | 'movements';
 type InventorySortKey = Extract<
@@ -47,6 +47,7 @@ export const InventoryModule: React.FC = () => {
     loadInventory,
     createInventoryItem,
     updateInventoryItem,
+    bulkUpdateInventoryItems,
     deleteInventoryItem,
     trackStockChange,
     getInventoryItemById,
@@ -90,11 +91,16 @@ export const InventoryModule: React.FC = () => {
   // Stock adjustment form
   const [movementType, setMovementType] = useState<StockMovementType>('purchase');
   const [delta, setDelta] = useState('50');
+  const [adjustUnitCost, setAdjustUnitCost] = useState('');
   const [reference, setReference] = useState('');
   const [note, setNote] = useState('');
 
   const outOfStockCount = useMemo(
     () => inventory.filter((i) => getInventoryStockStatus(i) === 'out_of_stock').length,
+    [inventory],
+  );
+  const belowMinCount = useMemo(
+    () => inventory.filter((i) => isBelowMinimumThreshold(i)).length,
     [inventory],
   );
   const consumableCount = useMemo(
@@ -205,6 +211,7 @@ export const InventoryModule: React.FC = () => {
     setAdjustTarget(item);
     setMovementType('purchase');
     setDelta(String(suggested > 0 ? suggested : 50));
+    setAdjustUnitCost(String(item.unitCost ?? 0));
     setReference('');
     setNote('');
   };
@@ -223,6 +230,7 @@ export const InventoryModule: React.FC = () => {
         itemType: values.itemType,
         unit: values.unit,
         reorderLevel: values.reorderLevel,
+        minimumThreshold: values.minimumThreshold,
         reorderQuantity: values.reorderQuantity,
         unitCost: values.unitCost,
         supplier: values.supplier,
@@ -253,13 +261,19 @@ export const InventoryModule: React.FC = () => {
     if (!adjustTarget) return;
     setSubmitting(true);
     try {
+      const parsedCost = Number(adjustUnitCost);
       await trackStockChange(adjustTarget.id, {
         movementType,
         quantityDelta: Number(delta) || 0,
+        unitCost:
+          adjustUnitCost.trim() !== '' && Number.isFinite(parsedCost) && parsedCost >= 0
+            ? parsedCost
+            : undefined,
         reference,
         note,
       });
       setAdjustTarget(null);
+      setAdjustUnitCost('');
       setReference('');
       setNote('');
     } catch (err) {
@@ -347,7 +361,7 @@ export const InventoryModule: React.FC = () => {
           </div>
           <div
             className={`text-2xl font-bold font-mono-num mt-1 ${
-              outOfStockCount > 0
+              outOfStockCount > 0 || belowMinCount > 0
                 ? 'text-[var(--pos-error)]'
                 : lowStock.length > 0
                   ? 'text-[var(--pos-warning)]'
@@ -357,7 +371,8 @@ export const InventoryModule: React.FC = () => {
             {lowStock.length}
           </div>
           <div className="text-[11px] text-[var(--pos-text-muted)] mt-1 font-mono-num">
-            {outOfStockCount} out of stock · {Math.max(0, lowStock.length - outOfStockCount)} at reorder
+            {outOfStockCount} out of stock · {belowMinCount} below min ·{' '}
+            {Math.max(0, lowStock.length - outOfStockCount)} at reorder
           </div>
         </Card>
         <Card>
@@ -535,6 +550,15 @@ export const InventoryModule: React.FC = () => {
           onEdit={openEditItemModal}
           onDelete={(item) => setDeleteTarget(item)}
           onAdjustStock={openAdjustModal}
+          onViewMovements={(item) => setDetailItemId(item.id)}
+          onUpdateMinimumThreshold={
+            canEditCatalog
+              ? async (item, minimumThreshold) => {
+                  await updateInventoryItem(item.id, { minimumThreshold });
+                }
+              : undefined
+          }
+          onBulkUpdate={bulkUpdateInventoryItems}
           onRowClick={(item) => setDetailItemId(item.id)}
           sortKey={sortKey}
           sortDir={sortDir}
@@ -611,219 +635,17 @@ export const InventoryModule: React.FC = () => {
         />
       )}
 
-      {/* Item Stock Details & Movement History Modal */}
-      <Modal
+      {/* Item Stock Details, Cost History Sparkline & Movement History Modal */}
+      <StockMovementModal
         open={Boolean(detailItem)}
         onClose={() => setDetailItemId(null)}
-        title={detailItem ? detailItem.name : ''}
-        subtitle={
-          detailItem
-            ? `${detailItem.sku} · ${detailItem.category}${
-                detailItem.storageLocation ? ` · ${detailItem.storageLocation}` : ''
-              }`
-            : ''
-        }
-        maxWidth="lg"
-        footer={
-          detailItem ? (
-            <>
-              {canEditCatalog && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    const current = detailItem;
-                    setDetailItemId(null);
-                    openEditItemModal(current);
-                  }}
-                >
-                  <Edit2 className="w-3.5 h-3.5" />
-                  Edit Item
-                </Button>
-              )}
-              <Button
-                size="sm"
-                onClick={() => {
-                  const current = detailItem;
-                  setDetailItemId(null);
-                  openAdjustModal(current);
-                }}
-              >
-                <ArrowUpDown className="w-3.5 h-3.5" />
-                Adjust Stock
-              </Button>
-            </>
-          ) : undefined
-        }
-      >
-        {detailItem && (() => {
-          const sup = extractSupplierInfo(detailItem);
-          const status = getInventoryStockStatus(detailItem);
-          const avail = getAvailableStock(detailItem);
-          const suggested = getSuggestedRestockQuantity(detailItem);
-
-          return (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div
-                  style={{ borderRadius: 'var(--pos-radius)' }}
-                  className="p-3 border border-[var(--pos-border)] bg-[var(--pos-bg)]"
-                >
-                  <div className="text-[11px] text-[var(--pos-text-muted)]">On Hand</div>
-                  <div className="text-lg font-bold font-mono-num text-[var(--pos-text)] mt-0.5">
-                    {detailItem.quantityOnHand} {detailItem.unit}
-                  </div>
-                </div>
-                <div
-                  style={{ borderRadius: 'var(--pos-radius)' }}
-                  className="p-3 border border-[var(--pos-border)] bg-[var(--pos-bg)]"
-                >
-                  <div className="text-[11px] text-[var(--pos-text-muted)]">Available</div>
-                  <div className="text-lg font-bold font-mono-num text-[var(--pos-text)] mt-0.5">
-                    {avail} {detailItem.unit}
-                  </div>
-                </div>
-                <div
-                  style={{ borderRadius: 'var(--pos-radius)' }}
-                  className="p-3 border border-[var(--pos-border)] bg-[var(--pos-bg)]"
-                >
-                  <div className="text-[11px] text-[var(--pos-text-muted)]">Reorder Level</div>
-                  <div className="text-lg font-bold font-mono-num text-[var(--pos-text)] mt-0.5">
-                    {detailItem.reorderLevel} {detailItem.unit}
-                  </div>
-                </div>
-                <div
-                  style={{ borderRadius: 'var(--pos-radius)' }}
-                  className="p-3 border border-[var(--pos-border)] bg-[var(--pos-bg)]"
-                >
-                  <div className="text-[11px] text-[var(--pos-text-muted)]">Status</div>
-                  <div className="mt-1.5">
-                    <StatusIndicator
-                      tone={
-                        status === 'out_of_stock'
-                          ? 'error'
-                          : status === 'low_stock'
-                            ? 'warning'
-                            : 'success'
-                      }
-                      label={
-                        status === 'out_of_stock'
-                          ? 'Out of Stock'
-                          : status === 'low_stock'
-                            ? 'Low Stock'
-                            : 'In Stock'
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div
-                style={{ borderRadius: 'var(--pos-radius)' }}
-                className="p-3.5 border border-[var(--pos-border)] grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs"
-              >
-                <div>
-                  <div className="text-[var(--pos-text-muted)]">Supplier</div>
-                  <div className="font-medium text-[var(--pos-text)] mt-0.5">
-                    {sup.name || 'No supplier set'}
-                  </div>
-                  {sup.contact && (
-                    <div className="text-[var(--pos-text-muted)] mt-0.5">{sup.contact}</div>
-                  )}
-                </div>
-                <div>
-                  <div className="text-[var(--pos-text-muted)]">Unit Cost & Valuation</div>
-                  <div className="font-mono-num font-medium text-[var(--pos-text)] mt-0.5">
-                    {formatCurrency(detailItem.unitCost, taxCurr)} / {detailItem.unit}
-                  </div>
-                  <div className="font-mono-num text-[var(--pos-text-muted)] mt-0.5">
-                    Total:{' '}
-                    {formatCurrency(detailItem.quantityOnHand * detailItem.unitCost, taxCurr)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[var(--pos-text-muted)]">Restock Guidance</div>
-                  <div className="font-mono-num font-medium text-[var(--pos-text)] mt-0.5">
-                    {suggested > 0
-                      ? `Suggested +${suggested} ${detailItem.unit}`
-                      : `Standard order ${detailItem.reorderQuantity || 0} ${detailItem.unit}`}
-                  </div>
-                  <div className="text-[var(--pos-text-muted)] mt-0.5">
-                    {detailItem.lastRestockedAt
-                      ? `Last restocked ${new Date(detailItem.lastRestockedAt).toLocaleDateString()}`
-                      : 'No restock recorded'}
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs font-semibold text-[var(--pos-text)] mb-2">
-                  Recent Stock Movements ({detailMovements.length})
-                </div>
-                <DataTable
-                  rows={detailMovements.slice(0, 12)}
-                  rowKey={(m) => m.id}
-                  emptyTitle="No movement history for this item"
-                  emptyDescription="Restocks, print job deductions, and manual counts will appear here."
-                  columns={[
-                    {
-                      key: 'type',
-                      label: 'Movement',
-                      render: (m) => (
-                        <div>
-                          <div className="text-xs font-medium text-[var(--pos-text)]">
-                            {STOCK_MOVEMENT_LABELS[m.movementType] || m.movementType}
-                          </div>
-                          <div className="text-[11px] text-[var(--pos-text-muted)]">
-                            {m.performedBy}
-                            {m.reference ? ` · ${m.reference}` : ''}
-                            {m.note ? ` · ${m.note}` : ''}
-                          </div>
-                        </div>
-                      ),
-                    },
-                    {
-                      key: 'date',
-                      label: 'Date',
-                      render: (m) => (
-                        <span className="font-mono-num text-xs text-[var(--pos-text-muted)]">
-                          {new Date(m.occurredAt || m.createdAt).toLocaleString()}
-                        </span>
-                      ),
-                    },
-                    {
-                      key: 'delta',
-                      label: 'Delta',
-                      align: 'right',
-                      render: (m) => (
-                        <span
-                          className={`font-mono-num font-semibold text-xs ${
-                            m.quantityDelta >= 0
-                              ? 'text-[var(--pos-success)]'
-                              : 'text-[var(--pos-error)]'
-                          }`}
-                        >
-                          {m.quantityDelta >= 0 ? `+${m.quantityDelta}` : m.quantityDelta}
-                        </span>
-                      ),
-                    },
-                    {
-                      key: 'balance',
-                      label: 'Balance',
-                      align: 'right',
-                      render: (m) => (
-                        <span className="font-mono-num text-xs font-semibold text-[var(--pos-text)]">
-                          {m.balanceAfter} {detailItem.unit}
-                        </span>
-                      ),
-                    },
-                  ]}
-                />
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
+        item={detailItem ?? null}
+        movements={detailMovements}
+        taxCurrency={taxCurr}
+        canEdit={canEditCatalog}
+        onEditItem={openEditItemModal}
+        onAdjustStock={openAdjustModal}
+      />
 
       {/* Reusable Add / Edit InventoryItem Dialog */}
       <InventoryItemDialog
@@ -864,14 +686,26 @@ export const InventoryModule: React.FC = () => {
               { value: 'return', label: 'Supplier / Customer Return (+)' },
             ]}
           />
-          <Input
-            label={`Quantity (${adjustTarget?.unit || 'units'})`}
-            type="number"
-            step="0.1"
-            value={delta}
-            onChange={(e) => setDelta(e.target.value)}
-            required
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Input
+              label={`Quantity (${adjustTarget?.unit || 'units'})`}
+              type="number"
+              step="0.1"
+              className="font-mono-num"
+              value={delta}
+              onChange={(e) => setDelta(e.target.value)}
+              required
+            />
+            <Input
+              label={`Unit Cost (${taxCurr.currencySymbol})`}
+              type="number"
+              min="0"
+              step="0.01"
+              className="font-mono-num"
+              value={adjustUnitCost}
+              onChange={(e) => setAdjustUnitCost(e.target.value)}
+            />
+          </div>
           <Input
             label="Reference # (PO / Job / Receipt)"
             placeholder="e.g. PO-2026-042 or JO-261124-102"

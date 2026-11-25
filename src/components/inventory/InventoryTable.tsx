@@ -1,6 +1,17 @@
-import React, { useMemo, useState } from 'react';
-import { AlertTriangle, ArrowUpDown, Edit2, Search, Trash2, X } from 'lucide-react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  ArrowUpDown,
+  Check,
+  CheckSquare,
+  Edit2,
+  History,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
 import type {
+  BulkInventoryUpdatePayload,
   InventoryItem,
   InventorySortDirection,
   InventorySortField,
@@ -15,6 +26,8 @@ import {
   getAvailableStock,
   getInventoryStockStatus,
   getSuggestedRestockQuantity,
+  isBelowMinimumThreshold,
+  resolveSupplyCategory,
 } from '../../shared/inventoryModel.ts';
 import { Button, Input, Select, StatusIndicator } from '../ui/Primitives.tsx';
 import { DataTable, type DataTableColumn } from '../ui/DataTable.tsx';
@@ -27,6 +40,12 @@ export interface InventoryTableProps {
   onEdit: (item: InventoryItem) => void;
   onDelete?: (item: InventoryItem) => void;
   onAdjustStock?: (item: InventoryItem) => void;
+  onViewMovements?: (item: InventoryItem) => void;
+  onUpdateMinimumThreshold?: (
+    item: InventoryItem,
+    minimumThreshold: number,
+  ) => Promise<void> | void;
+  onBulkUpdate?: (payload: BulkInventoryUpdatePayload) => Promise<InventoryItem[] | void> | void;
   onRowClick?: (item: InventoryItem) => void;
   sortKey?: InventorySortField;
   sortDir?: InventorySortDirection;
@@ -52,6 +71,9 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
   onEdit,
   onDelete,
   onAdjustStock,
+  onViewMovements,
+  onUpdateMinimumThreshold,
+  onBulkUpdate,
   onRowClick,
   sortKey = 'name',
   sortDir = 'asc',
@@ -68,8 +90,21 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
   emptyActionLabel,
   onEmptyAction,
 }) => {
+  const supplierDatalistId = useId();
+  const headerCheckboxRef = useRef<HTMLInputElement>(null);
+
   const [internalSearch, setInternalSearch] = useState('');
   const [internalCategory, setInternalCategory] = useState('all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkCategoryId, setBulkCategoryId] = useState('');
+  const [bulkSupplier, setBulkSupplier] = useState('');
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
+  const [editingMinId, setEditingMinId] = useState<string | null>(null);
+  const [editingMinValue, setEditingMinValue] = useState('');
+  const [savingMin, setSavingMin] = useState(false);
+  const [minEditError, setMinEditError] = useState<string | null>(null);
 
   const isSearchControlled = searchQuery !== undefined && onSearchChange !== undefined;
   const isCategoryControlled = categoryFilter !== undefined && onCategoryChange !== undefined;
@@ -135,8 +170,165 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
 
   const hasToolbarFilters = activeSearch.trim().length > 0 || activeCategory !== 'all';
 
-  const columns = useMemo<DataTableColumn<InventoryItem>[]>(
-    () => [
+  useEffect(() => {
+    const visibleSet = new Set(displayedItems.map((item) => item.id));
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (visibleSet.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [displayedItems]);
+
+  const allVisibleSelected =
+    displayedItems.length > 0 && displayedItems.every((item) => selectedIds.has(item.id));
+  const someVisibleSelected =
+    displayedItems.some((item) => selectedIds.has(item.id)) && !allVisibleSelected;
+
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
+
+  const toggleSelectAll = useCallback(() => {
+    setBulkError(null);
+    if (allVisibleSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(displayedItems.map((item) => item.id)));
+    }
+  }, [allVisibleSelected, displayedItems]);
+
+  const toggleSelectItem = useCallback((id: string) => {
+    setBulkError(null);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setBulkCategoryId('');
+    setBulkSupplier('');
+    setBulkError(null);
+  };
+
+  const { supplierSuggestions, knownSupplierContacts } = useMemo(() => {
+    const contactsMap = new Map<string, { name: string; contact: string }>();
+    for (const item of items) {
+      const sup = extractSupplierInfo(item);
+      const name = sup.name.trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      const existing = contactsMap.get(key);
+      if (!existing) {
+        contactsMap.set(key, { name, contact: (sup.contact || '').trim() });
+      } else if (!existing.contact && sup.contact) {
+        existing.contact = sup.contact.trim();
+      }
+    }
+    const suggestions = Array.from(contactsMap.values())
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+    return { supplierSuggestions: suggestions, knownSupplierContacts: contactsMap };
+  }, [items]);
+
+  const handleApplyBulkUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onBulkUpdate || selectedIds.size === 0) return;
+
+    const trimmedSupplier = bulkSupplier.trim();
+    if (!bulkCategoryId && !trimmedSupplier) {
+      setBulkError('Choose a supply category or enter a supplier name to apply.');
+      return;
+    }
+
+    const payload: BulkInventoryUpdatePayload = {
+      ids: Array.from(selectedIds),
+    };
+
+    if (bulkCategoryId) {
+      const matchedCategory = resolveSupplyCategory(supplyCategories, bulkCategoryId);
+      payload.categoryId = matchedCategory?.id ?? bulkCategoryId;
+      payload.category = matchedCategory?.name ?? bulkCategoryId;
+    }
+
+    if (trimmedSupplier) {
+      payload.supplier = trimmedSupplier;
+      const known = knownSupplierContacts.get(trimmedSupplier.toLowerCase());
+      if (known?.contact) {
+        payload.supplierContact = known.contact;
+      }
+    }
+
+    setBulkSubmitting(true);
+    setBulkError(null);
+    try {
+      await onBulkUpdate(payload);
+      clearSelection();
+    } catch (err) {
+      setBulkError(
+        err instanceof Error ? err.message : 'Unable to apply bulk updates to selected items.',
+      );
+    } finally {
+      setBulkSubmitting(false);
+    }
+  };
+
+  const startEditMin = useCallback((item: InventoryItem) => {
+    setEditingMinId(item.id);
+    setEditingMinValue(String(Math.max(0, Number(item.minimumThreshold) || 0)));
+    setMinEditError(null);
+  }, []);
+
+  const cancelEditMin = useCallback(() => {
+    setEditingMinId(null);
+    setEditingMinValue('');
+    setMinEditError(null);
+  }, []);
+
+  const saveMinThreshold = useCallback(
+    async (item: InventoryItem) => {
+      if (!onUpdateMinimumThreshold) return;
+      const parsed = Number(editingMinValue === '' ? '0' : editingMinValue);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        setMinEditError('Enter 0 or higher');
+        return;
+      }
+      const normalized = Number(parsed.toFixed(2));
+      setSavingMin(true);
+      setMinEditError(null);
+      try {
+        await onUpdateMinimumThreshold(item, normalized);
+        setEditingMinId(null);
+        setEditingMinValue('');
+      } catch (err) {
+        setMinEditError(
+          err instanceof Error ? err.message : 'Failed to update threshold',
+        );
+      } finally {
+        setSavingMin(false);
+      }
+    },
+    [editingMinValue, onUpdateMinimumThreshold],
+  );
+
+  const columns = useMemo<DataTableColumn<InventoryItem>[]>(() => {
+    const baseColumns: DataTableColumn<InventoryItem>[] = [
       {
         key: 'name',
         label: 'Item Name',
@@ -196,27 +388,36 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
             quantityOnHand: stockCount,
             reorderLevel: threshold,
           });
+          const isBelowMin = isBelowMinimumThreshold({
+            quantityOnHand: stockCount,
+            minimumThreshold: item.minimumThreshold,
+          });
+          const isCritical = status === 'out_of_stock' || isBelowMin;
           const avail = getAvailableStock({
             quantityOnHand: stockCount,
             reservedQuantity: item.reservedQuantity,
           });
-          const scaleMax = Math.max(threshold * 2, stockCount, 1);
+          const scaleMax = Math.max(
+            threshold * 2,
+            (item.minimumThreshold || 0) * 2,
+            stockCount,
+            1,
+          );
           const pct = Math.min(
             100,
             Math.max(0, Math.round((stockCount / scaleMax) * 100)),
           );
-          const meterColor =
-            status === 'out_of_stock'
-              ? 'bg-[var(--pos-error)]'
-              : status === 'low_stock'
-                ? 'bg-[var(--pos-warning)]'
-                : 'bg-[var(--pos-success)]';
+          const meterColor = isCritical
+            ? 'bg-[var(--pos-error)]'
+            : status === 'low_stock'
+              ? 'bg-[var(--pos-warning)]'
+              : 'bg-[var(--pos-success)]';
 
           return (
             <div className="inline-flex flex-col items-end min-w-[96px]">
               <div
                 className={`font-mono-num font-semibold text-sm ${
-                  status === 'out_of_stock'
+                  isCritical
                     ? 'text-[var(--pos-error)]'
                     : status === 'low_stock'
                       ? 'text-[var(--pos-warning)]'
@@ -242,19 +443,26 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
       },
       {
         key: 'reorderLevel',
-        label: 'Reorder Threshold',
+        label: 'Reorder / Min',
         align: 'right',
         sortable: Boolean(onSortChange),
         render: (item) => {
           const stockCount = item.currentStock ?? item.quantityOnHand;
           const threshold = item.reorderThreshold ?? item.reorderLevel;
+          const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
+          const isBelowMin = isBelowMinimumThreshold({
+            quantityOnHand: stockCount,
+            minimumThreshold: minThreshold,
+          });
           const suggested = getSuggestedRestockQuantity({
             quantityOnHand: stockCount,
             reorderLevel: threshold,
             reorderQuantity: item.reorderQuantity,
           });
+          const isEditingMin = editingMinId === item.id;
+
           return (
-            <div className="inline-flex flex-col items-end">
+            <div className="inline-flex flex-col items-end min-w-[120px]">
               <div className="font-mono-num text-sm font-medium text-[var(--pos-text)]">
                 {threshold} {item.unit}
               </div>
@@ -263,8 +471,102 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
                   ? `Restock +${suggested}`
                   : item.reorderQuantity
                     ? `Order ${item.reorderQuantity}`
-                    : 'Threshold'}
+                    : 'Reorder'}
               </div>
+
+              {isEditingMin ? (
+                <form
+                  onClick={(e) => e.stopPropagation()}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void saveMinThreshold(item);
+                  }}
+                  className="mt-1 flex flex-col items-end gap-1"
+                >
+                  <div className="inline-flex items-center gap-1">
+                    <span className="text-[11px] text-[var(--pos-text-muted)]">Min</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      autoFocus
+                      disabled={savingMin}
+                      value={editingMinValue}
+                      aria-label={`Minimum threshold for ${item.name}`}
+                      onChange={(e) => {
+                        setEditingMinValue(e.target.value);
+                        if (minEditError) setMinEditError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation();
+                          cancelEditMin();
+                        }
+                      }}
+                      style={{ borderRadius: 'calc(var(--pos-radius) - 4px)' }}
+                      className="w-16 h-6 px-1.5 text-right text-xs font-mono-num bg-[var(--pos-surface)] border border-[var(--pos-primary)] text-[var(--pos-text)] focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={savingMin}
+                      title="Save minimum threshold"
+                      aria-label={`Save minimum threshold for ${item.name}`}
+                      className="h-6 w-6 inline-flex items-center justify-center rounded border border-[var(--pos-primary)]/40 bg-[var(--pos-primary)]/10 text-[var(--pos-primary)] hover:bg-[var(--pos-primary)]/20 cursor-pointer disabled:opacity-50"
+                    >
+                      <Check className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingMin}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        cancelEditMin();
+                      }}
+                      title="Cancel"
+                      aria-label="Cancel minimum threshold edit"
+                      className="h-6 w-6 inline-flex items-center justify-center rounded border border-[var(--pos-border)] text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] cursor-pointer disabled:opacity-50"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                  {minEditError && (
+                    <span className="text-[10px] font-medium text-[var(--pos-error)]">
+                      {minEditError}
+                    </span>
+                  )}
+                </form>
+              ) : canEdit && onUpdateMinimumThreshold ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    startEditMin(item);
+                  }}
+                  title="Click to set minimum threshold (highlights row in red if stock falls below)"
+                  className={`mt-1 inline-flex items-center gap-1 text-[11px] font-mono-num rounded px-1.5 py-0.5 border transition-colors cursor-pointer ${
+                    isBelowMin
+                      ? 'text-[var(--pos-error)] border-[var(--pos-error)]/35 bg-[var(--pos-error)]/10 font-semibold hover:bg-[var(--pos-error)]/15'
+                      : minThreshold > 0
+                        ? 'text-[var(--pos-text-muted)] border-[var(--pos-border)] hover:text-[var(--pos-text)] hover:border-[var(--pos-primary)]/50'
+                        : 'text-[var(--pos-primary)] border-dashed border-[var(--pos-border)] hover:border-[var(--pos-primary)]'
+                  }`}
+                >
+                  <span>
+                    {minThreshold > 0 ? `Min: ${minThreshold} ${item.unit}` : 'Set min'}
+                  </span>
+                </button>
+              ) : minThreshold > 0 ? (
+                <div
+                  className={`text-[11px] font-mono-num mt-0.5 ${
+                    isBelowMin
+                      ? 'text-[var(--pos-error)] font-semibold'
+                      : 'text-[var(--pos-text-muted)]'
+                  }`}
+                >
+                  Min: {minThreshold} {item.unit}
+                </div>
+              ) : null}
             </div>
           );
         },
@@ -288,29 +590,66 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
         render: (item) => {
           const stockCount = item.currentStock ?? item.quantityOnHand;
           const threshold = item.reorderThreshold ?? item.reorderLevel;
+          const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
           const isLowStock = stockCount <= threshold;
           const isOutOfStock = stockCount <= 0;
+          const isBelowMin = isBelowMinimumThreshold({
+            quantityOnHand: stockCount,
+            minimumThreshold: minThreshold,
+          });
 
-          if (!isLowStock) {
+          if (!isLowStock && !isBelowMin) {
             return <StatusIndicator tone="success" label="In Stock" />;
+          }
+
+          if (isOutOfStock) {
+            return (
+              <div className="inline-flex flex-col items-start gap-0.5">
+                <span
+                  style={{ borderRadius: 'calc(var(--pos-radius) - 4px)' }}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold whitespace-nowrap border text-[var(--pos-error)] bg-[var(--pos-error)]/12 border-[var(--pos-error)]/30"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Out of Stock</span>
+                </span>
+                {minThreshold > 0 && (
+                  <span className="text-[11px] font-mono-num font-medium text-[var(--pos-error)]">
+                    Min {minThreshold} {item.unit}
+                  </span>
+                )}
+              </div>
+            );
+          }
+
+          if (isBelowMin) {
+            return (
+              <div className="inline-flex flex-col items-start gap-0.5">
+                <span
+                  style={{ borderRadius: 'calc(var(--pos-radius) - 4px)' }}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold whitespace-nowrap border text-[var(--pos-error)] bg-[var(--pos-error)]/12 border-[var(--pos-error)]/30"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Below Min</span>
+                </span>
+                <span className="text-[11px] font-mono-num font-medium text-[var(--pos-error)]">
+                  Min {minThreshold} {item.unit}
+                </span>
+              </div>
+            );
           }
 
           return (
             <div className="inline-flex flex-col items-start gap-0.5">
               <span
                 style={{ borderRadius: 'calc(var(--pos-radius) - 4px)' }}
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold whitespace-nowrap border ${
-                  isOutOfStock
-                    ? 'text-[var(--pos-error)] bg-[var(--pos-error)]/12 border-[var(--pos-error)]/30'
-                    : 'text-[var(--pos-warning)] bg-[var(--pos-warning)]/12 border-[var(--pos-warning)]/35'
-                }`}
+                className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-semibold whitespace-nowrap border text-[var(--pos-warning)] bg-[var(--pos-warning)]/12 border-[var(--pos-warning)]/35"
               >
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                 <span>Low Stock</span>
               </span>
-              {isOutOfStock && (
-                <span className="text-[11px] font-medium text-[var(--pos-error)]">
-                  Out of stock
+              {minThreshold > 0 && (
+                <span className="text-[11px] font-mono-num text-[var(--pos-text-muted)]">
+                  Min {minThreshold} {item.unit}
                 </span>
               )}
             </div>
@@ -349,6 +688,18 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
                 Stock
               </Button>
             )}
+            {onViewMovements && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onViewMovements(item)}
+                title={`View stock & cost history for ${item.name}`}
+                aria-label={`View stock movement history for ${item.name}`}
+              >
+                <History className="w-3.5 h-3.5" />
+                History
+              </Button>
+            )}
             {canEdit && onDelete && (
               <Button
                 variant="ghost"
@@ -365,18 +716,86 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
           </div>
         ),
       },
-    ],
-    [canEdit, onAdjustStock, onDelete, onEdit, onSortChange, taxAndCurrency],
-  );
+    ];
+
+    if (!canEdit) {
+      return baseColumns;
+    }
+
+    const selectionColumn: DataTableColumn<InventoryItem> = {
+      key: 'select',
+      label: (
+        <label className="flex items-center justify-center cursor-pointer">
+          <input
+            ref={headerCheckboxRef}
+            type="checkbox"
+            checked={allVisibleSelected}
+            onChange={toggleSelectAll}
+            aria-label="Select all visible inventory items"
+            className="h-4 w-4 rounded border-[var(--pos-border)] accent-[var(--pos-primary)] cursor-pointer"
+          />
+        </label>
+      ),
+      stopRowClick: true,
+      headerClassName: 'w-11 px-3',
+      cellClassName: 'w-11 px-3',
+      render: (item) => {
+        const checked = selectedIds.has(item.id);
+        return (
+          <label className="flex items-center justify-center py-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => toggleSelectItem(item.id)}
+              aria-label={`Select ${item.name}`}
+              className="h-4 w-4 rounded border-[var(--pos-border)] accent-[var(--pos-primary)] cursor-pointer"
+            />
+          </label>
+        );
+      },
+    };
+
+    return [selectionColumn, ...baseColumns];
+  }, [
+    allVisibleSelected,
+    canEdit,
+    cancelEditMin,
+    editingMinId,
+    editingMinValue,
+    minEditError,
+    onAdjustStock,
+    onDelete,
+    onEdit,
+    onSortChange,
+    onUpdateMinimumThreshold,
+    onViewMovements,
+    saveMinThreshold,
+    savingMin,
+    selectedIds,
+    startEditMin,
+    taxAndCurrency,
+    toggleSelectAll,
+    toggleSelectItem,
+  ]);
 
   const getRowHighlightClass = (item: InventoryItem): string => {
     const stockCount = item.currentStock ?? item.quantityOnHand;
     const threshold = item.reorderThreshold ?? item.reorderLevel;
-    if (stockCount <= 0) {
-      return 'bg-[var(--pos-error)]/[0.07] hover:bg-[var(--pos-error)]/[0.12]';
+    const isBelowMin = isBelowMinimumThreshold({
+      quantityOnHand: stockCount,
+      minimumThreshold: item.minimumThreshold,
+    });
+    const isSelected = selectedIds.has(item.id);
+    const selectedRing = isSelected ? 'ring-1 ring-inset ring-[var(--pos-primary)]/45' : '';
+
+    if (stockCount <= 0 || isBelowMin) {
+      return `bg-red-500/[0.12] hover:bg-red-500/[0.18] dark:bg-red-500/[0.16] dark:hover:bg-red-500/[0.22] ${selectedRing}`;
     }
     if (stockCount <= threshold) {
-      return 'bg-[var(--pos-warning)]/[0.08] hover:bg-[var(--pos-warning)]/[0.14]';
+      return `bg-[var(--pos-warning)]/[0.08] hover:bg-[var(--pos-warning)]/[0.14] ${selectedRing}`;
+    }
+    if (isSelected) {
+      return 'bg-[var(--pos-primary)]/[0.07] hover:bg-[var(--pos-primary)]/[0.12]';
     }
     return '';
   };
@@ -446,6 +865,101 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
               Showing {displayedItems.length} of {resolvedTotal} item(s)
             </div>
           </div>
+        </div>
+      )}
+
+      {canEdit && selectedIds.size > 0 && (
+        <div
+          role="region"
+          aria-label="Bulk inventory actions"
+          style={{ borderRadius: 'var(--pos-radius)' }}
+          className="px-3.5 py-2.5 border border-[var(--pos-primary)]/35 bg-[var(--pos-primary)]/[0.06] flex flex-col gap-2"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--pos-primary)]">
+                <CheckSquare className="w-4 h-4 shrink-0" />
+                <span className="font-mono-num">
+                  {selectedIds.size} {selectedIds.size === 1 ? 'item' : 'items'} selected
+                </span>
+              </span>
+              {!allVisibleSelected && displayedItems.length > selectedIds.size && (
+                <button
+                  type="button"
+                  onClick={toggleSelectAll}
+                  className="text-xs font-medium text-[var(--pos-primary)] hover:underline cursor-pointer"
+                >
+                  Select all {displayedItems.length}
+                </button>
+              )}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={bulkSubmitting}
+                onClick={clearSelection}
+              >
+                <X className="w-3.5 h-3.5" />
+                Clear
+              </Button>
+            </div>
+
+            <form
+              onSubmit={handleApplyBulkUpdate}
+              className="flex flex-wrap items-center gap-2 flex-1 justify-end min-w-[260px]"
+            >
+              <div className="w-full sm:w-48">
+                <Select
+                  aria-label="Bulk update supply category"
+                  value={bulkCategoryId}
+                  disabled={bulkSubmitting}
+                  onChange={(e) => setBulkCategoryId(e.target.value)}
+                  options={[
+                    { value: '', label: 'Supply Category (No change)' },
+                    ...supplyCategories.map((sc) => ({
+                      value: sc.id,
+                      label: sc.name,
+                    })),
+                  ]}
+                />
+              </div>
+
+              <div className="w-full sm:w-52">
+                <Input
+                  aria-label="Bulk update supplier"
+                  placeholder="Set supplier (optional)..."
+                  value={bulkSupplier}
+                  disabled={bulkSubmitting}
+                  list={supplierDatalistId}
+                  onChange={(e) => setBulkSupplier(e.target.value)}
+                />
+                <datalist id={supplierDatalistId}>
+                  {supplierSuggestions.map((supName) => (
+                    <option key={supName} value={supName} />
+                  ))}
+                </datalist>
+              </div>
+
+              <Button
+                type="submit"
+                size="sm"
+                loading={bulkSubmitting}
+                disabled={
+                  bulkSubmitting ||
+                  !onBulkUpdate ||
+                  (!bulkCategoryId && !bulkSupplier.trim())
+                }
+              >
+                Apply Updates
+              </Button>
+            </form>
+          </div>
+
+          {bulkError && (
+            <div role="alert" className="text-xs font-medium text-[var(--pos-error)]">
+              {bulkError}
+            </div>
+          )}
         </div>
       )}
 
