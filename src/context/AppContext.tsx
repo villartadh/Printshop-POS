@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useAppState } from './AppStateContext.tsx';
 import type {
   AppSettings,
@@ -11,12 +11,14 @@ import type {
   DesignTokens,
   ExpenseRecord,
   InterfaceDensity,
+  InventoryAlertNotification,
   InventoryItem,
   ModuleId,
   OfflineMutation,
   PlatformPreviewMode,
   PrintJob,
   PrintService,
+  ReorderRequestScope,
   ServiceCategory,
   StockAdjustmentPayload,
   StockMovement,
@@ -27,6 +29,7 @@ import type {
 } from '../shared/types.ts';
 import { DEFAULT_SUPPLY_CATEGORIES } from '../shared/defaults.ts';
 import {
+  buildInventoryAlertNotifications,
   calculateInventoryValuation,
   computeSignedStockDelta,
   inferReferenceType,
@@ -132,10 +135,21 @@ interface AppContextValue {
   users: UserAccount[];
   auditLogs: AuditLogEntry[];
 
-  // Toasts
+  // Toasts & Notification Center
   toasts: ToastMessage[];
   notify: (text: string, tone?: ToastMessage['tone']) => void;
   dismissToast: (id: string) => void;
+  belowMinimumItems: InventoryItem[];
+  hasSimultaneousThresholdBreach: boolean;
+  inventoryNotifications: InventoryAlertNotification[];
+  acknowledgedAlertSignatures: string[];
+  unreadNotificationCount: number;
+  markNotificationRead: (signature: string) => void;
+  markAllNotificationsRead: () => void;
+  reorderModalOpen: boolean;
+  reorderModalScope: ReorderRequestScope;
+  openReorderRequestModal: (scope?: ReorderRequestScope) => void;
+  closeReorderRequestModal: () => void;
 
   // Auth Actions
   refreshAuthStatus: () => Promise<void>;
@@ -258,6 +272,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [acknowledgedAlertSignatures, setAcknowledgedAlertSignatures] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('printshop_ack_alerts');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((s) => typeof s === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [reorderModalOpen, setReorderModalOpen] = useState(false);
+  const [reorderModalScope, setReorderModalScope] = useState<ReorderRequestScope>('below_minimum');
+  const prevBreachSignatureRef = useRef<string | null>(null);
 
   const notify = useCallback((text: string, tone: ToastMessage['tone'] = 'info') => {
     const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1014,6 +1041,99 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   }, [session, shifts]);
 
+  const alertSnapshot = useMemo(
+    () => buildInventoryAlertNotifications(inventory),
+    [inventory],
+  );
+
+  useEffect(() => {
+    if (inventory.length === 0) return;
+    const activeSignatures = new Set(alertSnapshot.notifications.map((n) => n.signature));
+    setAcknowledgedAlertSignatures((prev) => {
+      const pruned = prev.filter((sig) => activeSignatures.has(sig));
+      if (pruned.length === prev.length) return prev;
+      try {
+        localStorage.setItem('printshop_ack_alerts', JSON.stringify(pruned));
+      } catch {
+        // Ignore storage errors
+      }
+      return pruned;
+    });
+  }, [inventory.length, alertSnapshot.notifications]);
+
+  useEffect(() => {
+    if (inventory.length === 0) return;
+    if (prevBreachSignatureRef.current === null) {
+      prevBreachSignatureRef.current = alertSnapshot.breachSignature;
+      return;
+    }
+    if (
+      alertSnapshot.hasSimultaneousBreach &&
+      alertSnapshot.breachSignature !== prevBreachSignatureRef.current
+    ) {
+      prevBreachSignatureRef.current = alertSnapshot.breachSignature;
+      notify(
+        `${alertSnapshot.belowMinimumItems.length} inventory items crossed below minimum threshold simultaneously.`,
+        'error',
+      );
+      return;
+    }
+    if (!alertSnapshot.hasSimultaneousBreach && prevBreachSignatureRef.current !== '') {
+      prevBreachSignatureRef.current = '';
+    }
+  }, [
+    inventory.length,
+    alertSnapshot.hasSimultaneousBreach,
+    alertSnapshot.breachSignature,
+    alertSnapshot.belowMinimumItems.length,
+    notify,
+  ]);
+
+  const unreadNotificationCount = useMemo(
+    () =>
+      alertSnapshot.notifications.filter(
+        (n) => !acknowledgedAlertSignatures.includes(n.signature),
+      ).length,
+    [alertSnapshot.notifications, acknowledgedAlertSignatures],
+  );
+
+  const markNotificationRead = useCallback((signature: string) => {
+    setAcknowledgedAlertSignatures((prev) => {
+      if (prev.includes(signature)) return prev;
+      const next = [...prev, signature];
+      try {
+        localStorage.setItem('printshop_ack_alerts', JSON.stringify(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
+  const markAllNotificationsRead = useCallback(() => {
+    const allSigs = alertSnapshot.notifications.map((n) => n.signature);
+    setAcknowledgedAlertSignatures(allSigs);
+    try {
+      localStorage.setItem('printshop_ack_alerts', JSON.stringify(allSigs));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [alertSnapshot.notifications]);
+
+  const openReorderRequestModal = useCallback(
+    (scope?: ReorderRequestScope) => {
+      setReorderModalScope(
+        scope ?? (alertSnapshot.belowMinimumItems.length > 0 ? 'below_minimum' : 'all_low_stock'),
+      );
+      setReorderModalOpen(true);
+    },
+    [alertSnapshot.belowMinimumItems.length],
+  );
+
+  const closeReorderRequestModal = useCallback(() => {
+    setReorderModalOpen(false);
+  }, []);
+
   const inventoryState = useMemo<InventoryStateSlice>(
     () => ({
       items: inventory,
@@ -1074,6 +1194,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     toasts,
     notify,
     dismissToast,
+    belowMinimumItems: alertSnapshot.belowMinimumItems,
+    hasSimultaneousThresholdBreach: alertSnapshot.hasSimultaneousBreach,
+    inventoryNotifications: alertSnapshot.notifications,
+    acknowledgedAlertSignatures,
+    unreadNotificationCount,
+    markNotificationRead,
+    markAllNotificationsRead,
+    reorderModalOpen,
+    reorderModalScope,
+    openReorderRequestModal,
+    closeReorderRequestModal,
     refreshAuthStatus,
     setupAdmin,
     loginWithPassword,

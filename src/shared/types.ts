@@ -380,14 +380,18 @@ export interface PrintJob {
 
 export type {
   BulkInventoryUpdatePayload,
+  InventoryAlertNotification,
   InventoryItem,
   InventoryItemType,
+  InventoryNotificationKind,
   InventorySortConfig,
   InventorySortDirection,
   InventorySortField,
   InventoryStockFilter,
   InventorySupplierDetails,
   InventorySupplierInfo,
+  ReorderRequestItem,
+  ReorderRequestScope,
   StockAdjustmentPayload,
   StockMovement,
   StockMovementReferenceType,

@@ -20,6 +20,7 @@ import { detectHardwareCapabilities } from '../../services/hardwareService.ts';
 import type { InterfaceDensity, ModuleId, PlatformPreviewMode } from '../../shared/types.ts';
 import { PWAInstallButton } from '../ui/PWAInstallButton.tsx';
 import { MODULE_META } from './navigationMeta.ts';
+import { NotificationCenter } from './NotificationCenter.tsx';
 
 interface TopUtilityBarProps {
   layoutTier: 'desktop' | 'tablet' | 'mobile';
@@ -181,6 +182,9 @@ export const TopUtilityBar: React.FC<TopUtilityBarProps> = ({
             <span>Sync ({pendingSyncCount})</span>
           </button>
         ) : null}
+
+        {/* Inventory Minimum-Threshold & Stock Alert Notification Center */}
+        <NotificationCenter />
 
         {/* Printer & Hardware Readiness Indicator (Desktop/Tablet) */}
         {layoutTier !== 'mobile' && (

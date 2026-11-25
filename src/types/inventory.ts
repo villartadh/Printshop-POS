@@ -154,3 +154,45 @@ export interface BulkInventoryUpdatePayload {
   supplierSku?: string;
   leadTimeDays?: number;
 }
+
+export type ReorderRequestScope = 'below_minimum' | 'all_low_stock';
+
+export interface ReorderRequestItem {
+  inventoryItemId: string;
+  sku: string;
+  name: string;
+  category: string;
+  unit: string;
+  currentStock: number;
+  minimumThreshold: number;
+  reorderLevel: number;
+  shortfall: number;
+  recommendedOrderQty: number;
+  unitCost: number;
+  estimatedCost: number;
+  supplierName: string;
+  supplierContact: string;
+  supplierSku: string;
+  leadTimeDays: number;
+  isBelowMinimum: boolean;
+  isOutOfStock: boolean;
+}
+
+export type InventoryNotificationKind =
+  | 'simultaneous_minimum_breach'
+  | 'below_minimum'
+  | 'out_of_stock'
+  | 'low_stock';
+
+export interface InventoryAlertNotification {
+  id: string;
+  kind: InventoryNotificationKind;
+  severity: 'critical' | 'warning';
+  title: string;
+  message: string;
+  affectedItemIds: string[];
+  affectedItems: InventoryItem[];
+  timestamp: string;
+  signature: string;
+}
+

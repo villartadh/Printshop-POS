@@ -1,13 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
   ChevronDown,
   ChevronUp,
+  ClipboardList,
   Eye,
   EyeOff,
   SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
+import { isBelowMinimumThreshold } from '../../shared/inventoryModel.ts';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import type { Transaction } from '../../shared/types.ts';
 import { Button, Card, StatusIndicator } from '../../components/ui/Primitives.tsx';
@@ -30,6 +33,9 @@ export const DashboardModule: React.FC = () => {
     voidTransaction,
     refundTransaction,
     session,
+    belowMinimumItems,
+    hasSimultaneousThresholdBreach,
+    openReorderRequestModal,
   } = useApp();
 
   const taxCurr = settings.taxAndCurrency;
@@ -103,7 +109,9 @@ export const DashboardModule: React.FC = () => {
       (j) => !['completed', 'cancelled'].includes(j.productionStatus),
     ).length;
     const completedJobsCount = printJobs.filter((j) => j.productionStatus === 'completed').length;
-    const lowStockItems = inventory.filter((i) => i.quantityOnHand <= i.reorderLevel);
+    const lowStockItems = inventory.filter(
+      (i) => i.quantityOnHand <= i.reorderLevel || isBelowMinimumThreshold(i),
+    );
 
     // Build 7-day trend
     const trendPoints: Array<{ label: string; value: number }> = [];
@@ -202,6 +210,28 @@ export const DashboardModule: React.FC = () => {
             ))}
           </div>
 
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              openReorderRequestModal(
+                belowMinimumItems.length > 0 ? 'below_minimum' : 'all_low_stock',
+              )
+            }
+            className={
+              hasSimultaneousThresholdBreach
+                ? 'border-[var(--pos-error)]/40 text-[var(--pos-error)] hover:bg-[var(--pos-error)]/10'
+                : ''
+            }
+          >
+            <ClipboardList className="w-3.5 h-3.5" />
+            Generate Reorder List
+            {(belowMinimumItems.length > 0 || metrics.lowStockItems.length > 0) && (
+              <span className="font-mono-num">
+                ({belowMinimumItems.length > 0 ? belowMinimumItems.length : metrics.lowStockItems.length})
+              </span>
+            )}
+          </Button>
           <Button variant="outline" size="sm" onClick={() => setCustomizeOpen(true)}>
             <SlidersHorizontal className="w-3.5 h-3.5" />
             Customize
@@ -212,6 +242,45 @@ export const DashboardModule: React.FC = () => {
           </Button>
         </div>
       </div>
+
+      {/* Simultaneous Minimum Threshold Alert Banner */}
+      {hasSimultaneousThresholdBreach && (
+        <div
+          role="alert"
+          style={{ borderRadius: 'var(--pos-radius)' }}
+          className="px-4 py-3 border border-[var(--pos-error)]/30 bg-[var(--pos-error)]/[0.07] flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex items-start gap-2.5 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-[var(--pos-error)] shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-[var(--pos-error)]">
+                {belowMinimumItems.length} Inventory Items Simultaneously Below Minimum Threshold
+              </div>
+              <div className="text-xs text-[var(--pos-text-muted)] mt-0.5">
+                {belowMinimumItems
+                  .map((item) => `${item.name} (${item.quantityOnHand}/${item.minimumThreshold} ${item.unit})`)
+                  .join(' · ')}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setActiveModule('inventory')}
+            >
+              Inspect Stock
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => openReorderRequestModal('below_minimum')}
+            >
+              <ClipboardList className="w-3.5 h-3.5" />
+              Generate Reorder List
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Render Widgets in Configured Order */}
       {widgets.map((widget) => {
@@ -353,13 +422,29 @@ export const DashboardModule: React.FC = () => {
         if (widget.id === 'low_stock') {
           return (
             <Card key={widget.id}>
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                 <h2 className="text-sm font-semibold text-[var(--pos-text)]">
                   Low-Stock Printing Materials ({metrics.lowStockItems.length})
                 </h2>
-                <Button variant="ghost" size="sm" onClick={() => setActiveModule('inventory')}>
-                  Manage Stock
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  {metrics.lowStockItems.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        openReorderRequestModal(
+                          belowMinimumItems.length > 0 ? 'below_minimum' : 'all_low_stock',
+                        )
+                      }
+                    >
+                      <ClipboardList className="w-3.5 h-3.5" />
+                      Reorder Request List
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="sm" onClick={() => setActiveModule('inventory')}>
+                    Manage Stock
+                  </Button>
+                </div>
               </div>
               {metrics.lowStockItems.length === 0 ? (
                 <p className="text-xs text-[var(--pos-text-muted)] py-3">
@@ -367,20 +452,33 @@ export const DashboardModule: React.FC = () => {
                 </p>
               ) : (
                 <div className="divide-y divide-[var(--pos-border)]">
-                  {metrics.lowStockItems.map((item) => (
-                    <div key={item.id} className="py-2 flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-medium text-[var(--pos-text)]">{item.name}</div>
-                        <div className="text-xs text-[var(--pos-text-muted)]">
-                          {item.sku} · Reorder at {item.reorderLevel} {item.unit}
+                  {metrics.lowStockItems.map((item) => {
+                    const isBelowMin = isBelowMinimumThreshold(item);
+                    const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
+                    return (
+                      <div key={item.id} className="py-2 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-[var(--pos-text)] truncate">
+                            {item.name}
+                          </div>
+                          <div className="text-xs text-[var(--pos-text-muted)] font-mono-num">
+                            {item.sku} · Reorder at {item.reorderLevel} {item.unit}
+                            {minThreshold > 0 ? ` · Min ${minThreshold} ${item.unit}` : ''}
+                          </div>
                         </div>
+                        <StatusIndicator
+                          tone={item.quantityOnHand <= 0 || isBelowMin ? 'error' : 'warning'}
+                          label={
+                            item.quantityOnHand <= 0
+                              ? `Out of stock (${item.quantityOnHand} ${item.unit})`
+                              : isBelowMin
+                                ? `Below min (${item.quantityOnHand} ${item.unit})`
+                                : `${item.quantityOnHand} ${item.unit}`
+                          }
+                        />
                       </div>
-                      <StatusIndicator
-                        tone={item.quantityOnHand <= 0 ? 'error' : 'warning'}
-                        label={`${item.quantityOnHand} ${item.unit}`}
-                      />
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </Card>

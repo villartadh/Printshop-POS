@@ -6,6 +6,7 @@ import { DesktopSidebar } from './DesktopSidebar.tsx';
 import { TopUtilityBar } from './TopUtilityBar.tsx';
 import { MobileBottomNav } from './MobileBottomNav.tsx';
 import { GlobalSearchModal } from './GlobalSearchModal.tsx';
+import { ReorderRequestModal } from '../inventory/ReorderRequestModal.tsx';
 import { DashboardModule } from '../../modules/dashboard/DashboardModule.tsx';
 import { PosModule } from '../../modules/pos/PosModule.tsx';
 import { PrintJobsModule } from '../../modules/jobs/PrintJobsModule.tsx';
@@ -32,6 +33,9 @@ export const AppShell: React.FC = () => {
     refreshBootstrap,
     toasts,
     dismissToast,
+    reorderModalOpen,
+    reorderModalScope,
+    closeReorderRequestModal,
   } = useApp();
 
   const [moreSheetOpen, setMoreSheetOpen] = useState(false);
@@ -174,6 +178,12 @@ export const AppShell: React.FC = () => {
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
         onNavigate={setActiveModule}
+      />
+
+      <ReorderRequestModal
+        open={reorderModalOpen}
+        initialScope={reorderModalScope}
+        onClose={closeReorderRequestModal}
       />
 
       {toasts.length > 0 && (
