@@ -10,6 +10,9 @@ export type {
   InventoryStockFilter,
   InventorySupplierDetails,
   InventorySupplierInfo,
+  PredictiveReorderForecast,
+  PredictiveReorderVelocityConfidence,
+  RecordSupplierOrderPayload,
   ReorderRequestItem,
   ReorderRequestScope,
   StockAdjustmentPayload,
@@ -17,6 +20,11 @@ export type {
   StockMovementReferenceType,
   StockMovementType,
   StockStatus,
+  SupplierCsvImportPayload,
+  SupplierCsvMappingItem,
+  SupplierCsvMatchMethod,
+  SupplierRecord,
+  SupplierSavePayload,
   SupplyCategory,
 } from './inventory.ts';
 

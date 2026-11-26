@@ -25,19 +25,37 @@ import type {
   PrintJob,
   PrintService,
   ProductionStatus,
+  RecordSupplierOrderPayload,
   ServiceCategory,
   StockMovement,
   StockMovementType,
+  SupplierCsvImportPayload,
+  SupplierRecord,
+  SupplierSavePayload,
   SupplyCategory,
   Transaction,
 } from '../shared/types.ts';
 import { DEFAULT_SETTINGS } from '../shared/defaults.ts';
 import {
   computeSignedStockDelta,
+  generateUniqueInventorySku,
   inferReferenceType,
   validateInventoryItemInput,
   validateStockMovementInput,
 } from '../shared/inventoryModel.ts';
+import {
+  evaluateOffHoursScheduleWindow,
+  validateCriticalAlertConfig,
+} from '../shared/criticalAlertSchedule.ts';
+import {
+  acknowledgeAllCriticalAlertEvents,
+  acknowledgeCriticalAlertEvent,
+  evaluateAndDispatchCriticalAlerts,
+  getCriticalAlertConfig,
+  isSmtpConfigured,
+  listCriticalAlertEvents,
+  saveCriticalAlertConfig,
+} from './criticalAlertService.ts';
 
 export const apiRouter = express.Router();
 
@@ -101,6 +119,23 @@ function mapInventoryItemRow(i: Record<string, unknown>): InventoryItem {
   };
 }
 
+function mapSupplierRow(s: Record<string, unknown>): SupplierRecord {
+  return {
+    id: String(s.id),
+    name: String(s.name),
+    contactPerson: String(s.contact_person || ''),
+    phone: String(s.phone || ''),
+    email: String(s.email || ''),
+    address: String(s.address || ''),
+    defaultLeadTimeDays: Math.max(0, Number(s.default_lead_time_days) || 0),
+    paymentTerms: String(s.payment_terms || ''),
+    notes: String(s.notes || ''),
+    isDemo: s.is_demo === 1,
+    createdAt: s.created_at ? String(s.created_at) : String(s.updated_at),
+    updatedAt: String(s.updated_at),
+  };
+}
+
 function mapStockMovementRow(m: Record<string, unknown>): StockMovement {
   const delta = Number(m.quantity_delta) || 0;
   const balanceAfter = Number(m.balance_after) || 0;
@@ -128,6 +163,8 @@ function mapStockMovementRow(m: Record<string, unknown>): StockMovement {
     performedBy: String(m.performed_by),
     note: String(m.note || ''),
     occurredAt: m.occurred_at ? String(m.occurred_at) : createdAt,
+    orderedAt: m.ordered_at ? String(m.ordered_at) : undefined,
+    expectedDeliveryAt: m.expected_delivery_at ? String(m.expected_delivery_at) : undefined,
     createdAt,
   };
 }
@@ -514,6 +551,10 @@ apiRouter.get('/bootstrap', requireAuth, (_req, res) => {
     >
   ).map(mapInventoryItemRow);
 
+  const suppliers = (
+    db.prepare('SELECT * FROM suppliers ORDER BY name ASC').all() as Array<Record<string, unknown>>
+  ).map(mapSupplierRow);
+
   const stockMovements = (
     db.prepare('SELECT * FROM stock_movements ORDER BY created_at DESC LIMIT 200').all() as Array<
       Record<string, unknown>
@@ -607,12 +648,17 @@ apiRouter.get('/bootstrap', requireAuth, (_req, res) => {
     createdAt: String(a.created_at),
   }));
 
+  const criticalAlertConfig = getCriticalAlertConfig();
+  const criticalAlertEvents = listCriticalAlertEvents(100);
+  const criticalAlertSmtpConfigured = isSmtpConfigured();
+
   res.json({
     settings,
     categories,
     supplyCategories,
     services,
     inventory,
+    suppliers,
     stockMovements,
     customers,
     transactions,
@@ -621,6 +667,9 @@ apiRouter.get('/bootstrap', requireAuth, (_req, res) => {
     shifts,
     users,
     auditLogs,
+    criticalAlertConfig,
+    criticalAlertEvents,
+    criticalAlertSmtpConfigured,
     serverTime: new Date().toISOString(),
   });
 });
@@ -884,6 +933,7 @@ function applyTransactionCreation(
       const items = (payload.items || []) as CartItem[];
 
       // Deduct consumables
+      const deductedInventoryIds = new Set<string>();
       for (const item of items) {
         for (const binding of item.consumables || []) {
           const deductQty = Number((binding.quantityPerUnit * item.effectiveQuantity).toFixed(2));
@@ -894,6 +944,7 @@ function applyTransactionCreation(
             | { id: string; name: string; quantity_on_hand: number; unit_cost: number }
             | undefined;
           if (invRow) {
+            deductedInventoryIds.add(invRow.id);
             const qtyBefore = Number(invRow.quantity_on_hand) || 0;
             const nextQty = Math.max(0, Number((qtyBefore - deductQty).toFixed(2)));
             db.prepare('UPDATE inventory_items SET quantity_on_hand = ?, updated_at = ? WHERE id = ?').run(
@@ -924,6 +975,13 @@ function applyTransactionCreation(
             );
           }
         }
+      }
+      if (deductedInventoryIds.size > 0) {
+        void evaluateAndDispatchCriticalAlerts({
+          targetItemIds: Array.from(deductedInventoryIds),
+          actorId,
+          actorName,
+        }).catch(() => undefined);
       }
 
       // Create production print job if any item requires production job
@@ -1289,6 +1347,30 @@ apiRouter.post(
     const supplierSku = (i.supplierSku ?? supplierDetails?.supplierSku ?? '').trim();
     const leadTimeDays = Math.max(0, Number(i.leadTimeDays ?? supplierDetails?.leadTimeDays) || 0);
 
+    const existingSkuRows = db
+      .prepare('SELECT id, sku FROM inventory_items')
+      .all() as Array<{ id: string; sku: string }>;
+    const requestedSku = (i.sku || '').trim();
+    if (requestedSku) {
+      const duplicate = existingSkuRows.find(
+        (row) => row.sku.trim().toUpperCase() === requestedSku.toUpperCase(),
+      );
+      if (duplicate) {
+        return res.status(400).json({
+          error: `SKU "${requestedSku}" is already assigned to another inventory item.`,
+        });
+      }
+    }
+
+    const finalSku =
+      requestedSku ||
+      generateUniqueInventorySku({
+        categoryId: (i.categoryId || '').trim(),
+        categoryName: (i.category || 'Supplies').trim(),
+        supplier: supplierName,
+        existingItems: existingSkuRows,
+      }).sku;
+
     const run = db.transaction(() => {
       db.prepare(`
         INSERT INTO inventory_items (
@@ -1298,7 +1380,7 @@ apiRouter.post(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `).run(
         id,
-        (i.sku || '').trim() || `MAT-${Date.now().toString().slice(-4)}`,
+        finalSku,
         (i.barcode || '').trim(),
         itemName,
         (i.categoryId || '').trim(),
@@ -1516,6 +1598,136 @@ apiRouter.patch(
   },
 );
 
+apiRouter.post(
+  '/inventory/supplier-import',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const body = (req.body || {}) as Partial<SupplierCsvImportPayload>;
+    const rawMappings = Array.isArray(body.mappings) ? body.mappings : [];
+
+    if (rawMappings.length === 0) {
+      return res.status(400).json({ error: 'Provide at least one supplier mapping to apply.' });
+    }
+    if (rawMappings.length > 500) {
+      return res.status(400).json({ error: 'Cannot apply more than 500 supplier mappings at once.' });
+    }
+
+    const sanitizedMappings = rawMappings
+      .filter(
+        (m): m is NonNullable<typeof m> =>
+          Boolean(m) && typeof m.inventoryItemId === 'string' && m.inventoryItemId.trim().length > 0,
+      )
+      .map((m) => ({
+        inventoryItemId: m.inventoryItemId.trim(),
+        supplier:
+          typeof m.supplier === 'string' ? m.supplier.trim().slice(0, 160) : undefined,
+        supplierContact:
+          typeof m.supplierContact === 'string'
+            ? m.supplierContact.trim().slice(0, 160)
+            : undefined,
+        supplierSku:
+          typeof m.supplierSku === 'string'
+            ? m.supplierSku.trim().slice(0, 80)
+            : undefined,
+        leadTimeDays:
+          m.leadTimeDays !== undefined && Number.isFinite(Number(m.leadTimeDays))
+            ? Math.max(0, Math.min(365, Math.round(Number(m.leadTimeDays))))
+            : undefined,
+        unitCost:
+          m.unitCost !== undefined && Number.isFinite(Number(m.unitCost))
+            ? Math.max(0, Number(Number(m.unitCost).toFixed(2)))
+            : undefined,
+      }));
+
+    if (sanitizedMappings.length === 0) {
+      return res.status(400).json({ error: 'No valid inventory item IDs were provided.' });
+    }
+
+    const now = new Date().toISOString();
+    const selectStmt = db.prepare('SELECT * FROM inventory_items WHERE id = ?');
+    const updateStmt = db.prepare(`
+      UPDATE inventory_items
+      SET supplier = ?, supplier_contact = ?, supplier_sku = ?, lead_time_days = ?, unit_cost = ?, updated_at = ?
+      WHERE id = ?
+    `);
+
+    const updatedIds: string[] = [];
+
+    const run = db.transaction(() => {
+      for (const mapping of sanitizedMappings) {
+        const existing = selectStmt.get(mapping.inventoryItemId) as
+          | Record<string, unknown>
+          | undefined;
+        if (!existing) continue;
+
+        const nextSupplier =
+          mapping.supplier !== undefined && mapping.supplier.length > 0
+            ? mapping.supplier
+            : String(existing.supplier || '');
+        const nextContact =
+          mapping.supplierContact !== undefined && mapping.supplierContact.length > 0
+            ? mapping.supplierContact
+            : String(existing.supplier_contact || '');
+        const nextVendorSku =
+          mapping.supplierSku !== undefined && mapping.supplierSku.length > 0
+            ? mapping.supplierSku
+            : String(existing.supplier_sku || '');
+        const nextLeadTime =
+          mapping.leadTimeDays !== undefined
+            ? mapping.leadTimeDays
+            : Number(existing.lead_time_days) || 0;
+        const nextUnitCost =
+          mapping.unitCost !== undefined
+            ? mapping.unitCost
+            : Number(existing.unit_cost) || 0;
+
+        updateStmt.run(
+          nextSupplier,
+          nextContact,
+          nextVendorSku,
+          nextLeadTime,
+          nextUnitCost,
+          now,
+          mapping.inventoryItemId,
+        );
+        updatedIds.push(mapping.inventoryItemId);
+      }
+
+      if (updatedIds.length > 0) {
+        const safeFilename =
+          typeof body.sourceFilename === 'string'
+            ? body.sourceFilename.replace(/[^\w.\- ]+/g, '').slice(0, 80)
+            : '';
+        writeAuditLog(
+          req.authUser!.id,
+          req.authUser!.fullName,
+          'SUPPLIER_CSV_IMPORTED',
+          'inventory_item',
+          updatedIds.slice(0, 5).join(','),
+          `Mapped suppliers${safeFilename ? ` from ${safeFilename}` : ''} onto ${updatedIds.length} inventory item(s)`,
+        );
+      }
+    });
+    run();
+
+    if (updatedIds.length === 0) {
+      return res.status(404).json({ error: 'No matching inventory items found to update.' });
+    }
+
+    const uniqueIds = Array.from(new Set(updatedIds));
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    const updatedRows = db
+      .prepare(`SELECT * FROM inventory_items WHERE id IN (${placeholders}) ORDER BY name ASC`)
+      .all(...uniqueIds) as Array<Record<string, unknown>>;
+
+    res.json({
+      items: updatedRows.map(mapInventoryItemRow),
+      updatedCount: updatedRows.length,
+    });
+  },
+);
+
 apiRouter.patch(
   '/inventory/:id',
   requireAuth,
@@ -1563,6 +1775,23 @@ apiRouter.patch(
       return res.status(400).json({ error: 'Minimum threshold cannot be negative.' });
     }
 
+    let nextSku = String(existing.sku);
+    if (patch.sku !== undefined) {
+      const trimmedSku = String(patch.sku).trim();
+      if (!trimmedSku) {
+        return res.status(400).json({ error: 'SKU cannot be empty.' });
+      }
+      const duplicate = db
+        .prepare('SELECT id FROM inventory_items WHERE LOWER(sku) = LOWER(?) AND id != ?')
+        .get(trimmedSku, id) as { id: string } | undefined;
+      if (duplicate) {
+        return res.status(400).json({
+          error: `SKU "${trimmedSku}" is already assigned to another inventory item.`,
+        });
+      }
+      nextSku = trimmedSku;
+    }
+
     db.prepare(`
       UPDATE inventory_items
       SET sku = ?, barcode = ?, name = ?, category_id = ?, category = ?, item_type = ?, unit = ?,
@@ -1571,7 +1800,7 @@ apiRouter.patch(
           storage_location = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      patch.sku !== undefined ? String(patch.sku).trim() : String(existing.sku),
+      nextSku,
       patch.barcode !== undefined ? String(patch.barcode).trim() : String(existing.barcode || ''),
       patch.name !== undefined ? String(patch.name).trim() : String(existing.name),
       patch.categoryId !== undefined
@@ -1609,6 +1838,11 @@ apiRouter.patch(
     );
 
     const updated = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<string, unknown>;
+    void evaluateAndDispatchCriticalAlerts({
+      targetItemIds: [id],
+      actorId: req.authUser!.id,
+      actorName: req.authUser!.fullName,
+    }).catch(() => undefined);
     res.json(mapInventoryItemRow(updated));
   },
 );
@@ -1654,6 +1888,8 @@ function applyInventoryAdjustment(
     reference?: string;
     referenceType?: StockMovement['referenceType'];
     occurredAt?: string;
+    orderedAt?: string;
+    expectedDeliveryAt?: string;
   },
   actorId: string,
   actorName: string,
@@ -1684,6 +1920,12 @@ function applyInventoryAdjustment(
   const now = new Date().toISOString();
   const effectiveTimestamp =
     typeof payload.occurredAt === 'string' && payload.occurredAt ? payload.occurredAt : now;
+  const orderedAtStr =
+    typeof payload.orderedAt === 'string' && payload.orderedAt ? payload.orderedAt.trim().slice(0, 64) : '';
+  const expectedDeliveryAtStr =
+    typeof payload.expectedDeliveryAt === 'string' && payload.expectedDeliveryAt
+      ? payload.expectedDeliveryAt.trim().slice(0, 64)
+      : '';
   const restockedAt =
     signedDelta > 0 && (resolvedMovementType === 'purchase' || resolvedMovementType === 'return')
       ? effectiveTimestamp
@@ -1715,8 +1957,8 @@ function applyInventoryAdjustment(
       INSERT INTO stock_movements (
         id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
         balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
-        performed_by, note, occurred_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        performed_by, note, occurred_at, ordered_at, expected_delivery_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       movementId,
       id,
@@ -1732,10 +1974,20 @@ function applyInventoryAdjustment(
       actorName,
       payload.note || '',
       effectiveTimestamp,
+      orderedAtStr,
+      expectedDeliveryAtStr,
       now,
     );
   });
   run();
+
+  if (signedDelta < 0) {
+    void evaluateAndDispatchCriticalAlerts({
+      targetItemIds: [id],
+      actorId,
+      actorName,
+    }).catch(() => undefined);
+  }
 
   const updatedRow = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<
     string,
@@ -1770,6 +2022,380 @@ apiRouter.post('/inventory/:id/adjust', requireAuth, (req: AuthenticatedRequest,
     res.status(status).json({ error: err instanceof Error ? err.message : 'Stock adjustment failed.' });
   }
 });
+
+// ---------- SUPPLIERS & PROCUREMENT ORDERS ----------
+
+apiRouter.get('/suppliers', requireAuth, (_req, res) => {
+  const rows = db
+    .prepare('SELECT * FROM suppliers ORDER BY name ASC')
+    .all() as Array<Record<string, unknown>>;
+  res.json({
+    suppliers: rows.map(mapSupplierRow),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+apiRouter.post(
+  '/suppliers',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const body = (req.body || {}) as Partial<SupplierSavePayload>;
+    const name = typeof body.name === 'string' ? body.name.trim().slice(0, 140) : '';
+    if (!name) {
+      return res.status(400).json({ error: 'Supplier name is required.' });
+    }
+
+    const existing = db
+      .prepare('SELECT id FROM suppliers WHERE LOWER(TRIM(name)) = LOWER(?)')
+      .get(name) as { id: string } | undefined;
+    if (existing) {
+      return res.status(409).json({ error: `A supplier named "${name}" already exists.` });
+    }
+
+    const id = genId('sup');
+    const now = new Date().toISOString();
+    const contactPerson =
+      typeof body.contactPerson === 'string' ? body.contactPerson.trim().slice(0, 120) : '';
+    const phone = typeof body.phone === 'string' ? body.phone.trim().slice(0, 60) : '';
+    const email = typeof body.email === 'string' ? body.email.trim().slice(0, 140) : '';
+    const address = typeof body.address === 'string' ? body.address.trim().slice(0, 240) : '';
+    const paymentTerms =
+      typeof body.paymentTerms === 'string' ? body.paymentTerms.trim().slice(0, 80) : '';
+    const notes = typeof body.notes === 'string' ? body.notes.trim().slice(0, 600) : '';
+    const defaultLeadTimeDays =
+      body.defaultLeadTimeDays !== undefined && Number.isFinite(Number(body.defaultLeadTimeDays))
+        ? Math.max(0, Math.min(365, Math.round(Number(body.defaultLeadTimeDays))))
+        : 3;
+    const previousName =
+      typeof body.previousName === 'string' ? body.previousName.trim() : '';
+    const syncToLinkedItems = Boolean(body.syncToLinkedItems);
+    const primaryContact = phone || email || contactPerson;
+
+    let syncedItemsCount = 0;
+
+    const run = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO suppliers (
+          id, name, contact_person, phone, email, address, default_lead_time_days,
+          payment_terms, notes, is_demo, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+      `).run(
+        id,
+        name,
+        contactPerson,
+        phone,
+        email,
+        address,
+        defaultLeadTimeDays,
+        paymentTerms,
+        notes,
+        now,
+        now,
+      );
+
+      if (syncToLinkedItems) {
+        const matchName = previousName || name;
+        const info = db
+          .prepare(`
+            UPDATE inventory_items
+            SET supplier = ?,
+                supplier_contact = CASE WHEN ? != '' THEN ? ELSE supplier_contact END,
+                lead_time_days = ?,
+                updated_at = ?
+            WHERE LOWER(TRIM(supplier)) = LOWER(?) OR LOWER(TRIM(supplier)) = LOWER(?)
+          `)
+          .run(name, primaryContact, primaryContact, defaultLeadTimeDays, now, matchName, name);
+        syncedItemsCount = Number(info.changes) || 0;
+      }
+
+      writeAuditLog(
+        req.authUser!.id,
+        req.authUser!.fullName,
+        'SUPPLIER_CREATED',
+        'supplier',
+        id,
+        `Added supplier ${name} (${defaultLeadTimeDays}d lead time)`,
+      );
+    });
+    run();
+
+    const created = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(id) as Record<
+      string,
+      unknown
+    >;
+    res.status(201).json({
+      supplier: mapSupplierRow(created),
+      syncedItemsCount,
+    });
+  },
+);
+
+apiRouter.patch(
+  '/suppliers/:id',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const id = String(req.params.id);
+    const existing = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!existing) {
+      return res.status(404).json({ error: 'Supplier not found.' });
+    }
+
+    const body = (req.body || {}) as Partial<SupplierSavePayload>;
+    const nextName =
+      body.name !== undefined
+        ? String(body.name).trim().slice(0, 140)
+        : String(existing.name);
+    if (!nextName) {
+      return res.status(400).json({ error: 'Supplier name cannot be empty.' });
+    }
+
+    const duplicate = db
+      .prepare('SELECT id FROM suppliers WHERE LOWER(TRIM(name)) = LOWER(?) AND id != ?')
+      .get(nextName, id) as { id: string } | undefined;
+    if (duplicate) {
+      return res.status(409).json({ error: `A supplier named "${nextName}" already exists.` });
+    }
+
+    const now = new Date().toISOString();
+    const prevName = String(existing.name);
+    const contactPerson =
+      body.contactPerson !== undefined
+        ? String(body.contactPerson).trim().slice(0, 120)
+        : String(existing.contact_person || '');
+    const phone =
+      body.phone !== undefined
+        ? String(body.phone).trim().slice(0, 60)
+        : String(existing.phone || '');
+    const email =
+      body.email !== undefined
+        ? String(body.email).trim().slice(0, 140)
+        : String(existing.email || '');
+    const address =
+      body.address !== undefined
+        ? String(body.address).trim().slice(0, 240)
+        : String(existing.address || '');
+    const paymentTerms =
+      body.paymentTerms !== undefined
+        ? String(body.paymentTerms).trim().slice(0, 80)
+        : String(existing.payment_terms || '');
+    const notes =
+      body.notes !== undefined
+        ? String(body.notes).trim().slice(0, 600)
+        : String(existing.notes || '');
+    const defaultLeadTimeDays =
+      body.defaultLeadTimeDays !== undefined && Number.isFinite(Number(body.defaultLeadTimeDays))
+        ? Math.max(0, Math.min(365, Math.round(Number(body.defaultLeadTimeDays))))
+        : Number(existing.default_lead_time_days) || 0;
+
+    const syncToLinkedItems = Boolean(body.syncToLinkedItems);
+    const primaryContact = phone || email || contactPerson;
+    let syncedItemsCount = 0;
+
+    const run = db.transaction(() => {
+      db.prepare(`
+        UPDATE suppliers
+        SET name = ?, contact_person = ?, phone = ?, email = ?, address = ?,
+            default_lead_time_days = ?, payment_terms = ?, notes = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        nextName,
+        contactPerson,
+        phone,
+        email,
+        address,
+        defaultLeadTimeDays,
+        paymentTerms,
+        notes,
+        now,
+        id,
+      );
+
+      if (syncToLinkedItems || prevName.toLowerCase() !== nextName.toLowerCase()) {
+        const info = db
+          .prepare(`
+            UPDATE inventory_items
+            SET supplier = ?,
+                supplier_contact = CASE WHEN ? != '' THEN ? ELSE supplier_contact END,
+                lead_time_days = CASE WHEN ? THEN ? ELSE lead_time_days END,
+                updated_at = ?
+            WHERE LOWER(TRIM(supplier)) = LOWER(?) OR LOWER(TRIM(supplier)) = LOWER(?)
+          `)
+          .run(
+            nextName,
+            syncToLinkedItems ? primaryContact : '',
+            primaryContact,
+            syncToLinkedItems ? 1 : 0,
+            defaultLeadTimeDays,
+            now,
+            prevName,
+            nextName,
+          );
+        syncedItemsCount = Number(info.changes) || 0;
+      }
+
+      writeAuditLog(
+        req.authUser!.id,
+        req.authUser!.fullName,
+        'SUPPLIER_UPDATED',
+        'supplier',
+        id,
+        `Updated supplier ${nextName} (${defaultLeadTimeDays}d lead time)`,
+      );
+    });
+    run();
+
+    const updated = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(id) as Record<
+      string,
+      unknown
+    >;
+    res.json({
+      supplier: mapSupplierRow(updated),
+      syncedItemsCount,
+    });
+  },
+);
+
+apiRouter.delete(
+  '/suppliers/:id',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const id = String(req.params.id);
+    const existing = db.prepare('SELECT id, name FROM suppliers WHERE id = ?').get(id) as
+      | { id: string; name: string }
+      | undefined;
+    if (!existing) {
+      return res.status(404).json({ error: 'Supplier not found.' });
+    }
+    db.prepare('DELETE FROM suppliers WHERE id = ?').run(id);
+    writeAuditLog(
+      req.authUser!.id,
+      req.authUser!.fullName,
+      'SUPPLIER_DELETED',
+      'supplier',
+      id,
+      `Removed supplier profile ${existing.name}`,
+    );
+    res.json({ ok: true, id });
+  },
+);
+
+apiRouter.post(
+  '/suppliers/record-order',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const body = (req.body || {}) as Partial<RecordSupplierOrderPayload>;
+    const supplierName =
+      typeof body.supplierName === 'string' ? body.supplierName.trim().slice(0, 140) : '';
+    const reference =
+      typeof body.reference === 'string' ? body.reference.trim().slice(0, 80) : '';
+    const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
+    const occurredAt =
+      typeof body.occurredAt === 'string' && body.occurredAt.trim()
+        ? body.occurredAt.trim()
+        : new Date().toISOString();
+    const orderedAt =
+      typeof body.orderedAt === 'string' && body.orderedAt.trim()
+        ? body.orderedAt.trim()
+        : undefined;
+    const expectedDeliveryAt =
+      typeof body.expectedDeliveryAt === 'string' && body.expectedDeliveryAt.trim()
+        ? body.expectedDeliveryAt.trim()
+        : undefined;
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+
+    if (!supplierName) {
+      return res.status(400).json({ error: 'Supplier name is required.' });
+    }
+    if (!reference) {
+      return res.status(400).json({ error: 'Purchase order reference # is required.' });
+    }
+    if (rawItems.length === 0) {
+      return res.status(400).json({ error: 'Select at least one inventory item to order.' });
+    }
+    if (rawItems.length > 100) {
+      return res.status(400).json({ error: 'Cannot record more than 100 line items per purchase order.' });
+    }
+
+    const sanitizedLines = rawItems
+      .filter(
+        (line): line is NonNullable<typeof line> =>
+          Boolean(line) &&
+          typeof line.inventoryItemId === 'string' &&
+          line.inventoryItemId.trim().length > 0 &&
+          Number(line.quantity) > 0,
+      )
+      .map((line) => ({
+        inventoryItemId: line.inventoryItemId.trim(),
+        quantity: Number(Number(line.quantity).toFixed(2)),
+        unitCost:
+          line.unitCost !== undefined &&
+          Number.isFinite(Number(line.unitCost)) &&
+          Number(line.unitCost) >= 0
+            ? Number(Number(line.unitCost).toFixed(2))
+            : undefined,
+      }));
+
+    if (sanitizedLines.length === 0) {
+      return res.status(400).json({ error: 'Each order line requires a positive quantity.' });
+    }
+
+    const movements: StockMovement[] = [];
+    const updatedItems: InventoryItem[] = [];
+
+    try {
+      const run = db.transaction(() => {
+        for (const line of sanitizedLines) {
+          const result = applyInventoryAdjustment(
+            line.inventoryItemId,
+            {
+              movementType: 'purchase',
+              quantityDelta: line.quantity,
+              unitCost: line.unitCost,
+              referenceType: 'purchase_order',
+              reference,
+              occurredAt,
+              orderedAt,
+              expectedDeliveryAt,
+              note: note || `Purchase order ${reference} from ${supplierName}`,
+            },
+            req.authUser!.id,
+            req.authUser!.fullName,
+          );
+          movements.push(result.movement);
+          updatedItems.push(result.item);
+        }
+
+        writeAuditLog(
+          req.authUser!.id,
+          req.authUser!.fullName,
+          'SUPPLIER_PO_RECORDED',
+          'supplier',
+          reference,
+          `Recorded PO ${reference} from ${supplierName} (${sanitizedLines.length} item(s))`,
+        );
+      });
+      run();
+    } catch (err) {
+      const status = (err as { statusCode?: number })?.statusCode || 400;
+      return res.status(status).json({
+        error: err instanceof Error ? err.message : 'Unable to record purchase order.',
+      });
+    }
+
+    res.status(201).json({
+      reference,
+      supplierName,
+      movements,
+      items: updatedItems,
+    });
+  },
+);
 
 // ---------- CUSTOMERS ----------
 
@@ -2108,6 +2734,7 @@ apiRouter.get(
       settings: settingsRow ? parseJsonSafe(settingsRow.value_json, DEFAULT_SETTINGS) : DEFAULT_SETTINGS,
       categories: db.prepare('SELECT * FROM categories').all(),
       services: db.prepare('SELECT * FROM services').all(),
+      suppliers: db.prepare('SELECT * FROM suppliers').all(),
       inventory_items: db.prepare('SELECT * FROM inventory_items').all(),
       customers: db.prepare('SELECT * FROM customers').all(),
       transactions: db.prepare('SELECT * FROM transactions').all(),
@@ -2125,3 +2752,110 @@ apiRouter.get(
     res.json(backup);
   },
 );
+
+// ---------- OFF-HOURS & WEEKEND CRITICAL STOCK ALERTS ----------
+
+apiRouter.get('/alerts/critical-config', requireAuth, (_req, res) => {
+  const config = getCriticalAlertConfig();
+  res.json({
+    config,
+    smtpConfigured: isSmtpConfigured(),
+    scheduleStatus: evaluateOffHoursScheduleWindow(config),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+apiRouter.put(
+  '/alerts/critical-config',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const incoming = req.body || {};
+    const validation = validateCriticalAlertConfig(incoming);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
+    const saved = saveCriticalAlertConfig(incoming);
+    writeAuditLog(
+      req.authUser!.id,
+      req.authUser!.fullName,
+      'CRITICAL_ALERT_CONFIG_UPDATED',
+      'critical_alert_rules',
+      'default',
+      `Updated off-hours/weekend alert schedule (${saved.enabled ? 'enabled' : 'paused'}, channel: ${saved.channel})`,
+    );
+    res.json({
+      config: saved,
+      smtpConfigured: isSmtpConfigured(),
+      scheduleStatus: evaluateOffHoursScheduleWindow(saved),
+      serverTime: new Date().toISOString(),
+    });
+  },
+);
+
+apiRouter.get('/alerts/critical-events', requireAuth, (req, res) => {
+  const limit = Number(req.query.limit) || 100;
+  const events = listCriticalAlertEvents(limit);
+  const config = getCriticalAlertConfig();
+  res.json({
+    events,
+    activeCount: events.filter((e) => e.systemAlertStatus === 'active').length,
+    scheduleStatus: evaluateOffHoursScheduleWindow(config),
+    smtpConfigured: isSmtpConfigured(),
+    serverTime: new Date().toISOString(),
+  });
+});
+
+apiRouter.post(
+  '/alerts/critical-events/test',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const simulateOffHours = req.body?.simulateOffHours !== false;
+      const result = await evaluateAndDispatchCriticalAlerts({
+        forceManualTest: simulateOffHours,
+        actorId: req.authUser!.id,
+        actorName: req.authUser!.fullName,
+      });
+      const events = listCriticalAlertEvents(100);
+      res.json({
+        triggeredEvents: result.triggeredEvents,
+        skippedReason: result.skippedReason,
+        scheduleStatus: result.scheduleStatus,
+        events,
+        smtpConfigured: isSmtpConfigured(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to evaluate critical stock alerts.',
+      });
+    }
+  },
+);
+
+apiRouter.post(
+  '/alerts/critical-events/acknowledge-all',
+  requireAuth,
+  (req: AuthenticatedRequest, res) => {
+    const count = acknowledgeAllCriticalAlertEvents(req.authUser!.fullName);
+    const events = listCriticalAlertEvents(100);
+    res.json({ ok: true, acknowledgedCount: count, events });
+  },
+);
+
+apiRouter.post(
+  '/alerts/critical-events/:id/acknowledge',
+  requireAuth,
+  (req: AuthenticatedRequest, res) => {
+    const updated = acknowledgeCriticalAlertEvent(
+      String(req.params.id),
+      req.authUser!.fullName,
+    );
+    if (!updated) {
+      return res.status(404).json({ error: 'Critical alert event not found.' });
+    }
+    res.json({ event: updated });
+  },
+);
+

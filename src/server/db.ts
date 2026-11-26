@@ -11,8 +11,10 @@ import {
   DEMO_PRINT_JOBS,
   DEMO_SERVICES,
   DEMO_STOCK_MOVEMENTS,
+  DEMO_SUPPLIERS,
   DEMO_TRANSACTIONS,
 } from '../shared/defaults.ts';
+import { DEFAULT_CRITICAL_ALERT_CONFIG } from '../shared/criticalAlertSchedule.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) {
@@ -101,6 +103,21 @@ export function initDatabase() {
       is_demo INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE TABLE IF NOT EXISTS suppliers (
+      id TEXT PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      contact_person TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      default_lead_time_days INTEGER NOT NULL DEFAULT 3,
+      payment_terms TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      is_demo INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS inventory_items (
       id TEXT PRIMARY KEY,
       sku TEXT NOT NULL,
@@ -142,6 +159,8 @@ export function initDatabase() {
       performed_by TEXT NOT NULL,
       note TEXT NOT NULL DEFAULT '',
       occurred_at TEXT NOT NULL DEFAULT '',
+      ordered_at TEXT NOT NULL DEFAULT '',
+      expected_delivery_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL
     );
 
@@ -257,6 +276,32 @@ export function initDatabase() {
       summary TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS critical_alert_rules (
+      id TEXT PRIMARY KEY,
+      config_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS critical_alert_events (
+      id TEXT PRIMARY KEY,
+      inventory_item_id TEXT NOT NULL,
+      item_name TEXT NOT NULL,
+      sku TEXT NOT NULL,
+      unit TEXT NOT NULL,
+      quantity_on_hand REAL NOT NULL DEFAULT 0,
+      critical_threshold REAL NOT NULL DEFAULT 0,
+      channel TEXT NOT NULL,
+      trigger_reason TEXT NOT NULL,
+      window_label TEXT NOT NULL,
+      recipients_json TEXT NOT NULL DEFAULT '[]',
+      email_status TEXT NOT NULL DEFAULT 'not_applicable',
+      email_status_detail TEXT NOT NULL DEFAULT '',
+      system_alert_status TEXT NOT NULL DEFAULT 'active',
+      acknowledged_by TEXT NOT NULL DEFAULT '',
+      acknowledged_at TEXT NOT NULL DEFAULT '',
+      triggered_at TEXT NOT NULL
+    );
   `);
 
   // Safe idempotent column migrations for existing databases
@@ -284,6 +329,8 @@ export function initDatabase() {
   ensureColumn('stock_movements', 'reference_type', "TEXT NOT NULL DEFAULT 'manual'");
   ensureColumn('stock_movements', 'performed_by_id', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('stock_movements', 'occurred_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('stock_movements', 'ordered_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('stock_movements', 'expected_delivery_at', "TEXT NOT NULL DEFAULT ''");
 
   // Ensure default supply categories exist
   const supplyCatCount = (
@@ -311,10 +358,102 @@ export function initDatabase() {
     );
   }
 
+  // Ensure default off-hours/weekend critical alert schedule exists
+  const alertRuleRow = db
+    .prepare('SELECT id FROM critical_alert_rules WHERE id = ?')
+    .get('default') as { id: string } | undefined;
+  if (!alertRuleRow) {
+    const nowIso = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO critical_alert_rules (id, config_json, updated_at) VALUES (?, ?, ?)',
+    ).run(
+      'default',
+      JSON.stringify({ ...DEFAULT_CRITICAL_ALERT_CONFIG, updatedAt: nowIso }),
+      nowIso,
+    );
+  }
+
   // Seed initial demonstration dataset only if catalog is empty on first boot
   const serviceCount = (db.prepare('SELECT COUNT(*) as count FROM services').get() as { count: number }).count;
   if (serviceCount === 0) {
     seedDemoDataset();
+  } else {
+    const supplierCount = (
+      db.prepare('SELECT COUNT(*) as count FROM suppliers').get() as { count: number }
+    ).count;
+    const demoInvCount = (
+      db.prepare('SELECT COUNT(*) as count FROM inventory_items WHERE is_demo = 1').get() as {
+        count: number;
+      }
+    ).count;
+    if (supplierCount === 0 && demoInvCount > 0) {
+      const insertSup = db.prepare(`
+        INSERT OR IGNORE INTO suppliers (
+          id, name, contact_person, phone, email, address, default_lead_time_days,
+          payment_terms, notes, is_demo, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `);
+      for (const sup of DEMO_SUPPLIERS) {
+        insertSup.run(
+          sup.id,
+          sup.name,
+          sup.contactPerson || '',
+          sup.phone || '',
+          sup.email || '',
+          sup.address || '',
+          sup.defaultLeadTimeDays ?? 3,
+          sup.paymentTerms || '',
+          sup.notes || '',
+          sup.createdAt || sup.updatedAt,
+          sup.updatedAt,
+        );
+      }
+    }
+
+    // Backfill demo purchase movements with delivery schedule metadata on existing demo databases
+    if (demoInvCount > 0) {
+      const insertDemoMov = db.prepare(`
+        INSERT OR IGNORE INTO stock_movements (
+          id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
+          balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
+          performed_by, note, occurred_at, ordered_at, expected_delivery_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const updateDemoSchedule = db.prepare(`
+        UPDATE stock_movements
+        SET ordered_at = ?, expected_delivery_at = ?, occurred_at = ?
+        WHERE id = ? AND ordered_at = ''
+      `);
+      for (const m of DEMO_STOCK_MOVEMENTS) {
+        insertDemoMov.run(
+          m.id,
+          m.inventoryItemId,
+          m.itemName,
+          m.movementType,
+          m.quantityBefore ?? Math.max(0, m.balanceAfter - m.quantityDelta),
+          m.quantityDelta,
+          m.balanceAfter,
+          m.unitCostAtMovement ?? 0,
+          m.referenceType || 'manual',
+          m.reference,
+          m.performedById || '',
+          m.performedBy,
+          m.note,
+          m.occurredAt || m.createdAt,
+          m.orderedAt || '',
+          m.expectedDeliveryAt || '',
+          m.createdAt,
+        );
+        if (m.orderedAt || m.expectedDeliveryAt) {
+          updateDemoSchedule.run(
+            m.orderedAt || '',
+            m.expectedDeliveryAt || '',
+            m.occurredAt || m.createdAt,
+            m.id,
+          );
+        }
+      }
+    }
   }
 }
 
@@ -333,6 +472,28 @@ export function seedDemoDataset() {
     `);
     for (const sc of DEFAULT_SUPPLY_CATEGORIES) {
       insertSupCat.run(sc.id, sc.name, sc.description, sc.defaultUnit, sc.sortOrder);
+    }
+
+    const insertSup = db.prepare(`
+      INSERT OR IGNORE INTO suppliers (
+        id, name, contact_person, phone, email, address, default_lead_time_days,
+        payment_terms, notes, is_demo, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `);
+    for (const sup of DEMO_SUPPLIERS) {
+      insertSup.run(
+        sup.id,
+        sup.name,
+        sup.contactPerson || '',
+        sup.phone || '',
+        sup.email || '',
+        sup.address || '',
+        sup.defaultLeadTimeDays ?? 3,
+        sup.paymentTerms || '',
+        sup.notes || '',
+        sup.createdAt || sup.updatedAt,
+        sup.updatedAt,
+      );
     }
 
     const insertInv = db.prepare(`
@@ -373,8 +534,8 @@ export function seedDemoDataset() {
       INSERT OR IGNORE INTO stock_movements (
         id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
         balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
-        performed_by, note, occurred_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        performed_by, note, occurred_at, ordered_at, expected_delivery_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const m of DEMO_STOCK_MOVEMENTS) {
       insertMov.run(
@@ -392,6 +553,8 @@ export function seedDemoDataset() {
         m.performedBy,
         m.note,
         m.occurredAt || m.createdAt,
+        m.orderedAt || '',
+        m.expectedDeliveryAt || '',
         m.createdAt,
       );
     }
@@ -558,6 +721,7 @@ export function clearDemoDataset() {
     db.prepare('DELETE FROM customers WHERE is_demo = 1').run();
     db.prepare('DELETE FROM services WHERE is_demo = 1').run();
     db.prepare('DELETE FROM inventory_items WHERE is_demo = 1').run();
+    db.prepare('DELETE FROM suppliers WHERE is_demo = 1').run();
     db.prepare('DELETE FROM categories WHERE is_demo = 1').run();
   });
   tx();

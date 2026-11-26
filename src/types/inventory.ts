@@ -122,6 +122,10 @@ export interface StockMovement {
   note: string;
   /** Effective date stamp when the stock event occurred */
   occurredAt?: string;
+  /** Purchase order placement timestamp (used for delivery lead-time tracking) */
+  orderedAt?: string;
+  /** Promised/expected delivery date stamp for purchase orders */
+  expectedDeliveryAt?: string;
   /** Record creation ISO date stamp */
   createdAt: string;
 }
@@ -134,6 +138,8 @@ export interface StockAdjustmentPayload {
   reference?: string;
   referenceType?: StockMovementReferenceType;
   occurredAt?: string;
+  orderedAt?: string;
+  expectedDeliveryAt?: string;
 }
 
 export interface InventoryStockFilter {
@@ -155,7 +161,50 @@ export interface BulkInventoryUpdatePayload {
   leadTimeDays?: number;
 }
 
-export type ReorderRequestScope = 'below_minimum' | 'all_low_stock';
+export type ReorderRequestScope =
+  | 'below_minimum'
+  | 'nearing_threshold'
+  | 'all_low_stock';
+
+export type PredictiveReorderVelocityConfidence = 'high' | 'medium' | 'baseline';
+
+export interface PredictiveReorderForecast {
+  inventoryItemId: string;
+  sku: string;
+  name: string;
+  category: string;
+  unit: string;
+  currentStock: number;
+  minimumThreshold: number;
+  reorderLevel: number;
+  thresholdBaseline: number;
+  leadTimeDays: number;
+  lookbackDays: number;
+  targetCoverageDays: number;
+  salesConsumedUnits: number;
+  otherUsageUnits: number;
+  totalConsumedUnits: number;
+  recent7dDailyVelocity: number;
+  windowDailyVelocity: number;
+  weightedDailyVelocity: number;
+  weeklyDemand: number;
+  daysUntilThreshold: number | null;
+  daysUntilStockout: number | null;
+  projectedStockoutDate: string | null;
+  isBelowMinimum: boolean;
+  isAtReorder: boolean;
+  isNearingThreshold: boolean;
+  urgencyScore: number;
+  suggestedOrderQty: number;
+  configuredOrderQty: number;
+  unitCost: number;
+  estimatedOrderCost: number;
+  supplierName: string;
+  supplierContact: string;
+  supplierSku: string;
+  confidence: PredictiveReorderVelocityConfidence;
+  rationale: string;
+}
 
 export interface ReorderRequestItem {
   inventoryItemId: string;
@@ -176,6 +225,11 @@ export interface ReorderRequestItem {
   leadTimeDays: number;
   isBelowMinimum: boolean;
   isOutOfStock: boolean;
+  dailyVelocity?: number;
+  daysUntilThreshold?: number | null;
+  daysUntilStockout?: number | null;
+  confidence?: PredictiveReorderVelocityConfidence;
+  forecastRationale?: string;
 }
 
 export type InventoryNotificationKind =
@@ -194,5 +248,120 @@ export interface InventoryAlertNotification {
   affectedItems: InventoryItem[];
   timestamp: string;
   signature: string;
+}
+
+export type SupplierCsvMatchMethod =
+  | 'exact_sku'
+  | 'supplier_sku'
+  | 'supplier_name'
+  | 'manual'
+  | 'unmatched';
+
+export interface SupplierCsvMappingItem {
+  inventoryItemId: string;
+  supplier?: string;
+  supplierContact?: string;
+  supplierSku?: string;
+  leadTimeDays?: number;
+  unitCost?: number;
+  matchMethod?: SupplierCsvMatchMethod;
+}
+
+export interface SupplierCsvImportPayload {
+  mappings: SupplierCsvMappingItem[];
+  sourceFilename?: string;
+}
+
+export interface SupplierRecord {
+  id: string;
+  name: string;
+  contactPerson?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  defaultLeadTimeDays: number;
+  paymentTerms?: string;
+  notes?: string;
+  isDemo?: boolean;
+  createdAt?: string;
+  updatedAt: string;
+}
+
+export interface SupplierSavePayload {
+  id?: string;
+  name: string;
+  previousName?: string;
+  contactPerson?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  defaultLeadTimeDays: number;
+  paymentTerms?: string;
+  notes?: string;
+  syncToLinkedItems?: boolean;
+}
+
+export interface RecordSupplierOrderPayload {
+  supplierName: string;
+  reference: string;
+  orderedAt?: string;
+  expectedDeliveryAt?: string;
+  occurredAt?: string;
+  note?: string;
+  items: Array<{
+    inventoryItemId: string;
+    quantity: number;
+    unitCost?: number;
+  }>;
+}
+
+export type OffHoursAlertChannel = 'system' | 'email' | 'both';
+export type CriticalThresholdTriggerMode = 'below_minimum' | 'at_or_below_minimum';
+export type CriticalAlertTriggerReason = 'weekend' | 'off_hours' | 'manual_test';
+export type CriticalAlertEmailStatus =
+  | 'sent'
+  | 'logged_preview'
+  | 'not_applicable'
+  | 'failed';
+
+export interface CriticalAlertScheduleConfig {
+  enabled: boolean;
+  channel: OffHoursAlertChannel;
+  recipientEmails: string[];
+  monitorWeekends: boolean;
+  monitorOffHoursWeekdays: boolean;
+  businessHoursStart: string; // HH:mm 24h
+  businessHoursEnd: string; // HH:mm 24h
+  timezone: string; // IANA timezone e.g. Asia/Manila
+  triggerMode: CriticalThresholdTriggerMode;
+  cooldownMinutes: number;
+  updatedAt: string;
+}
+
+export interface CriticalAlertScheduleStatus {
+  isOffHoursOrWeekend: boolean;
+  triggerReason: 'weekend' | 'off_hours' | null;
+  windowLabel: string;
+  localTimeSummary: string;
+}
+
+export interface CriticalAlertEvent {
+  id: string;
+  inventoryItemId: string;
+  itemName: string;
+  sku: string;
+  unit: string;
+  quantityOnHand: number;
+  criticalThreshold: number;
+  channel: OffHoursAlertChannel;
+  triggerReason: CriticalAlertTriggerReason;
+  windowLabel: string;
+  recipients: string[];
+  emailStatus: CriticalAlertEmailStatus;
+  emailStatusDetail: string;
+  systemAlertStatus: 'active' | 'acknowledged';
+  acknowledgedBy?: string;
+  acknowledgedAt?: string;
+  triggeredAt: string;
 }
 

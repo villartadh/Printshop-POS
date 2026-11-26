@@ -38,6 +38,7 @@ export type ModuleId =
   | 'jobs'
   | 'services'
   | 'inventory'
+  | 'suppliers'
   | 'customers'
   | 'finance'
   | 'shifts'
@@ -380,6 +381,12 @@ export interface PrintJob {
 
 export type {
   BulkInventoryUpdatePayload,
+  CriticalAlertEmailStatus,
+  CriticalAlertEvent,
+  CriticalAlertScheduleConfig,
+  CriticalAlertScheduleStatus,
+  CriticalAlertTriggerReason,
+  CriticalThresholdTriggerMode,
   InventoryAlertNotification,
   InventoryItem,
   InventoryItemType,
@@ -390,6 +397,10 @@ export type {
   InventoryStockFilter,
   InventorySupplierDetails,
   InventorySupplierInfo,
+  OffHoursAlertChannel,
+  PredictiveReorderForecast,
+  PredictiveReorderVelocityConfidence,
+  RecordSupplierOrderPayload,
   ReorderRequestItem,
   ReorderRequestScope,
   StockAdjustmentPayload,
@@ -397,6 +408,11 @@ export type {
   StockMovementReferenceType,
   StockMovementType,
   StockStatus,
+  SupplierCsvImportPayload,
+  SupplierCsvMappingItem,
+  SupplierCsvMatchMethod,
+  SupplierRecord,
+  SupplierSavePayload,
   SupplyCategory,
 } from '../types/inventory.ts';
 

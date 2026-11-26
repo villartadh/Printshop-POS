@@ -6,6 +6,7 @@ import {
   Copy,
   Download,
   Printer,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { downloadCsv } from '../../services/hardwareService.ts';
@@ -13,6 +14,7 @@ import {
   buildReorderRequestList,
   isBelowMinimumThreshold,
 } from '../../shared/inventoryModel.ts';
+import { computePredictiveReorderForecasts } from '../../shared/predictiveReorderEngine.ts';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import type { ReorderRequestItem, ReorderRequestScope } from '../../types/inventory.ts';
 import { Button } from '../ui/Primitives.tsx';
@@ -29,10 +31,20 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
   initialScope = 'below_minimum',
   onClose,
 }) => {
-  const { inventory, settings, setActiveModule, notify } = useApp();
+  const {
+    inventory,
+    transactions,
+    services,
+    stockMovements,
+    settings,
+    setActiveModule,
+    notify,
+  } = useApp();
   const taxCurr = settings.taxAndCurrency;
 
   const [scope, setScope] = useState<ReorderRequestScope>(initialScope);
+  const [lookbackDays, setLookbackDays] = useState<14 | 30 | 60>(30);
+  const [coverageDays, setCoverageDays] = useState<14 | 30 | 45>(30);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [qtyOverrides, setQtyOverrides] = useState<Record<string, number>>({});
   const [copied, setCopied] = useState(false);
@@ -43,9 +55,32 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
     setCopied(false);
   }, [open, initialScope]);
 
+  const forecasts = useMemo(
+    () =>
+      computePredictiveReorderForecasts({
+        inventory,
+        transactions,
+        services,
+        stockMovements,
+        lookbackDays,
+        targetCoverageDays: coverageDays,
+      }),
+    [inventory, transactions, services, stockMovements, lookbackDays, coverageDays],
+  );
+
+  const forecastsByItemId = useMemo(
+    () => new Map(forecasts.map((f) => [f.inventoryItemId, f])),
+    [forecasts],
+  );
+
   const belowMinCount = useMemo(
     () => inventory.filter((item) => isBelowMinimumThreshold(item)).length,
     [inventory],
+  );
+
+  const nearingCount = useMemo(
+    () => forecasts.filter((f) => f.isNearingThreshold).length,
+    [forecasts],
   );
 
   const allLowCount = useMemo(
@@ -59,7 +94,7 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
   );
 
   const requestRows = useMemo<ReorderRequestItem[]>(() => {
-    const base = buildReorderRequestList(inventory, scope);
+    const base = buildReorderRequestList(inventory, scope, forecastsByItemId);
     return base.map((row) => {
       const override = qtyOverrides[row.inventoryItemId];
       const orderQty =
@@ -72,15 +107,20 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
         estimatedCost: Number((orderQty * row.unitCost).toFixed(2)),
       };
     });
-  }, [inventory, scope, qtyOverrides]);
+  }, [inventory, scope, forecastsByItemId, qtyOverrides]);
 
   useEffect(() => {
     if (!open) return;
     setSelectedIds(new Set(requestRows.map((r) => r.inventoryItemId)));
   }, [open, scope, inventory.length]);
 
+  const hasOverrides = Object.keys(qtyOverrides).length > 0;
+
   const selectedRows = useMemo(
-    () => requestRows.filter((row) => selectedIds.has(row.inventoryItemId) && row.recommendedOrderQty > 0),
+    () =>
+      requestRows.filter(
+        (row) => selectedIds.has(row.inventoryItemId) && row.recommendedOrderQty > 0,
+      ),
     [requestRows, selectedIds],
   );
 
@@ -141,10 +181,17 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
       bySupplier.set(row.supplierName, list);
     }
 
+    const scopeLabel =
+      scope === 'below_minimum'
+        ? 'Items Below Minimum Threshold'
+        : scope === 'nearing_threshold'
+          ? 'Predictive Velocity: Items Nearing / Below Threshold'
+          : 'All Low-Stock Items';
+
     const dateStamp = new Date().toLocaleDateString();
     const lines: string[] = [
       `${settings.branding.businessName} — Inventory Reorder Request (${dateStamp})`,
-      `Scope: ${scope === 'below_minimum' ? 'Items Below Minimum Threshold' : 'All Low-Stock Items'}`,
+      `Scope: ${scopeLabel} · Target Coverage: ${coverageDays}d (${lookbackDays}d velocity window)`,
       `Items: ${summary.itemCount} · Suppliers: ${summary.supplierCount} · Est. Total: ${formatCurrency(summary.totalCost, taxCurr)}`,
       '',
     ];
@@ -154,8 +201,12 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
       lines.push(`Supplier: ${supplierName}${contact}`);
       for (const item of items) {
         const skuNote = item.supplierSku ? ` [Vendor SKU: ${item.supplierSku}]` : '';
+        const velocityNote =
+          item.dailyVelocity && item.dailyVelocity > 0
+            ? ` | Velocity: ${item.dailyVelocity}/day`
+            : '';
         lines.push(
-          `  - ${item.name} (${item.sku})${skuNote}: Order ${item.recommendedOrderQty} ${item.unit} | On hand: ${item.currentStock} / Min: ${item.minimumThreshold} | Est. ${formatCurrency(item.estimatedCost, taxCurr)}`,
+          `  - ${item.name} (${item.sku})${skuNote}: Order ${item.recommendedOrderQty} ${item.unit} | On hand: ${item.currentStock} / Min: ${item.minimumThreshold}${velocityNote} | Est. ${formatCurrency(item.estimatedCost, taxCurr)}`,
         );
       }
       lines.push('');
@@ -191,11 +242,13 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
         'Current Stock',
         'Minimum Threshold',
         'Reorder Level',
-        'Shortfall',
+        'Daily Sales Velocity',
+        'Days Until Stockout',
         'Order Quantity',
         'Unit Cost',
         'Estimated Cost',
         'Lead Time (Days)',
+        'Forecast Basis',
       ],
       selectedRows.map((r) => [
         r.sku,
@@ -208,11 +261,13 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
         r.currentStock,
         r.minimumThreshold,
         r.reorderLevel,
-        r.shortfall,
+        r.dailyVelocity ?? 0,
+        r.daysUntilStockout ?? '',
         r.recommendedOrderQty,
         r.unitCost,
         r.estimatedCost,
         r.leadTimeDays,
+        r.forecastRationale || '',
       ]),
     );
     notify(`Exported ${selectedRows.length} reorder item(s) to CSV.`, 'success');
@@ -231,7 +286,7 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
       open={open}
       onClose={onClose}
       title="Inventory Reorder Request List"
-      subtitle="Review affected items, adjust order quantities, and export or copy supplier purchase requests"
+      subtitle="Velocity-predicted reorder quantities based on historical sales, lead time, and threshold buffers"
       maxWidth="xl"
       footer={
         <div className="w-full flex flex-wrap items-center justify-between gap-2">
@@ -280,20 +335,20 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
       }
     >
       <div id="printable-document" className="space-y-4">
-        {/* Top Controls & Scope Switcher */}
+        {/* Top Controls & Predictive Scope Switcher */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div
             role="tablist"
             aria-label="Reorder request scope"
             style={{ borderRadius: 'var(--pos-radius)' }}
-            className="inline-flex items-center gap-1 p-1 bg-[var(--pos-bg)] border border-[var(--pos-border)]"
+            className="inline-flex flex-wrap items-center gap-1 p-1 bg-[var(--pos-bg)] border border-[var(--pos-border)]"
           >
             <button
               type="button"
               role="tab"
               aria-selected={scope === 'below_minimum'}
               onClick={() => setScope('below_minimum')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
                 scope === 'below_minimum'
                   ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
                   : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
@@ -304,9 +359,22 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
             <button
               type="button"
               role="tab"
+              aria-selected={scope === 'nearing_threshold'}
+              onClick={() => setScope('nearing_threshold')}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+                scope === 'nearing_threshold'
+                  ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
+                  : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+              }`}
+            >
+              Nearing Threshold ({nearingCount})
+            </button>
+            <button
+              type="button"
+              role="tab"
               aria-selected={scope === 'all_low_stock'}
               onClick={() => setScope('all_low_stock')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
                 scope === 'all_low_stock'
                   ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
                   : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
@@ -316,7 +384,63 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-4 text-xs font-mono-num">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex items-center gap-1 text-xs">
+              <span className="text-[var(--pos-text-muted)]">Velocity:</span>
+              {([14, 30, 60] as const).map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setLookbackDays(d)}
+                  className={`px-2 py-1 rounded font-mono-num text-[11px] font-medium border cursor-pointer ${
+                    lookbackDays === d
+                      ? 'border-[var(--pos-primary)] bg-[var(--pos-primary)]/10 text-[var(--pos-primary)]'
+                      : 'border-[var(--pos-border)] text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+                  }`}
+                >
+                  {d}d
+                </button>
+              ))}
+            </div>
+
+            <div className="inline-flex items-center gap-1 text-xs">
+              <span className="text-[var(--pos-text-muted)]">Cover:</span>
+              {([14, 30, 45] as const).map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setCoverageDays(d)}
+                  className={`px-2 py-1 rounded font-mono-num text-[11px] font-medium border cursor-pointer ${
+                    coverageDays === d
+                      ? 'border-[var(--pos-primary)] bg-[var(--pos-primary)]/10 text-[var(--pos-primary)]'
+                      : 'border-[var(--pos-border)] text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+                  }`}
+                >
+                  {d}d
+                </button>
+              ))}
+            </div>
+
+            {hasOverrides && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setQtyOverrides({})}
+                title="Reset manually edited quantities to velocity forecast"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset Forecast
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Summary Metrics Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--pos-border)] bg-[var(--pos-bg)] text-xs font-mono-num">
+          <div className="text-[var(--pos-text-muted)] font-sans">
+            Forecast engine uses {lookbackDays}-day sales &amp; usage velocity for {coverageDays}-day stock coverage
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
             <div>
               <span className="text-[var(--pos-text-muted)]">Selected: </span>
               <span className="font-semibold text-[var(--pos-text)]">
@@ -344,21 +468,23 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
             title={
               scope === 'below_minimum'
                 ? 'No items below minimum threshold'
-                : 'All inventory levels are healthy'
+                : scope === 'nearing_threshold'
+                  ? 'No items nearing threshold'
+                  : 'All inventory levels are healthy'
             }
             description={
-              scope === 'below_minimum' && allLowCount > 0
-                ? 'Switch to All Low Stock above to include items that have reached their reorder warning level.'
+              scope === 'below_minimum' && (nearingCount > 0 || allLowCount > 0)
+                ? 'Switch to Nearing Threshold or All Low Stock above to review items approaching reorder thresholds.'
                 : 'Stock levels are currently above configured thresholds.'
             }
             actionLabel={
-              scope === 'below_minimum' && allLowCount > 0
-                ? `View All Low Stock (${allLowCount})`
+              scope === 'below_minimum' && nearingCount > 0
+                ? `View Nearing Threshold (${nearingCount})`
                 : undefined
             }
             onAction={
-              scope === 'below_minimum' && allLowCount > 0
-                ? () => setScope('all_low_stock')
+              scope === 'below_minimum' && nearingCount > 0
+                ? () => setScope('nearing_threshold')
                 : undefined
             }
           />
@@ -381,9 +507,10 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
                       className="h-4 w-4 rounded border-[var(--pos-border)] accent-[var(--pos-primary)] cursor-pointer"
                     />
                   </th>
-                  <th className="py-2.5 px-3 font-semibold">Item & SKU</th>
+                  <th className="py-2.5 px-3 font-semibold">Item &amp; SKU</th>
                   <th className="py-2.5 px-3 font-semibold">Supplier</th>
                   <th className="py-2.5 px-3 font-semibold text-right">Stock / Threshold</th>
+                  <th className="py-2.5 px-3 font-semibold text-right">Sales Velocity</th>
                   <th className="py-2.5 px-3 font-semibold text-right">Order Qty</th>
                   <th className="py-2.5 px-3 font-semibold text-right">Est. Cost</th>
                 </tr>
@@ -420,7 +547,7 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
                           {row.sku} · {row.category}
                         </div>
                       </td>
-                      <td className="py-2.5 px-3 align-middle min-w-[150px]">
+                      <td className="py-2.5 px-3 align-middle min-w-[140px]">
                         <div className="font-medium text-[var(--pos-text)]">
                           {row.supplierName}
                         </div>
@@ -451,24 +578,52 @@ export const ReorderRequestModal: React.FC<ReorderRequestModalProps> = ({
                             : `Reorder ${row.reorderLevel}`}
                         </div>
                       </td>
+                      <td className="py-2.5 px-3 align-middle text-right font-mono-num whitespace-nowrap">
+                        {row.dailyVelocity && row.dailyVelocity > 0 ? (
+                          <div>
+                            <div className="font-semibold text-[var(--pos-text)]">
+                              {row.dailyVelocity} {row.unit}/day
+                            </div>
+                            <div className="text-[11px] text-[var(--pos-text-muted)]">
+                              {row.daysUntilStockout !== null && row.daysUntilStockout !== undefined
+                                ? `~${row.daysUntilStockout}d left`
+                                : 'Active demand'}
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <div className="text-[var(--pos-text-muted)]">0 /day</div>
+                            <div className="text-[11px] text-[var(--pos-text-muted)]">
+                              Baseline qty
+                            </div>
+                          </div>
+                        )}
+                      </td>
                       <td className="py-2.5 px-3 align-middle text-right whitespace-nowrap">
-                        <div className="inline-flex items-center justify-end gap-1.5">
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            disabled={!checked}
-                            value={row.recommendedOrderQty}
-                            onChange={(e) =>
-                              handleQtyChange(row.inventoryItemId, e.target.value)
-                            }
-                            aria-label={`Order quantity for ${row.name}`}
-                            style={{ borderRadius: 'calc(var(--pos-radius) - 4px)' }}
-                            className="w-20 h-8 px-2 text-right font-mono-num text-xs bg-[var(--pos-surface)] border border-[var(--pos-border)] text-[var(--pos-text)] focus:outline-none focus:border-[var(--pos-primary)] disabled:opacity-45"
-                          />
-                          <span className="text-[11px] text-[var(--pos-text-muted)] min-w-[36px] text-left">
-                            {row.unit}
-                          </span>
+                        <div className="inline-flex flex-col items-end gap-0.5">
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              disabled={!checked}
+                              value={row.recommendedOrderQty}
+                              onChange={(e) =>
+                                handleQtyChange(row.inventoryItemId, e.target.value)
+                              }
+                              aria-label={`Order quantity for ${row.name}`}
+                              style={{ borderRadius: 'calc(var(--pos-radius) - 4px)' }}
+                              className="w-20 h-8 px-2 text-right font-mono-num text-xs bg-[var(--pos-surface)] border border-[var(--pos-border)] text-[var(--pos-text)] focus:outline-none focus:border-[var(--pos-primary)] disabled:opacity-45"
+                            />
+                            <span className="text-[11px] text-[var(--pos-text-muted)] min-w-[36px] text-left">
+                              {row.unit}
+                            </span>
+                          </div>
+                          {row.forecastRationale && (
+                            <span className="text-[10px] text-[var(--pos-text-muted)] max-w-[175px] truncate">
+                              {row.forecastRationale}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-2.5 px-3 align-middle text-right font-mono-num font-semibold text-[var(--pos-text)] whitespace-nowrap">

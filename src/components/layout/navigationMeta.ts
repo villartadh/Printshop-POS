@@ -10,6 +10,7 @@ import {
   Settings,
   ShoppingCart,
   Tag,
+  Truck,
   Users,
 } from 'lucide-react';
 import type { ModuleId } from '../../shared/types.ts';
@@ -51,6 +52,12 @@ export const MODULE_META: Record<ModuleId, ModuleMeta> = {
     shortLabel: 'Stock',
     description: 'Consumables, stock counts, reorder levels, and movements',
     icon: Package,
+  },
+  suppliers: {
+    label: 'Supplier Management',
+    shortLabel: 'Suppliers',
+    description: 'Vendor contacts, lead times, procurement forecasts, and purchase orders',
+    icon: Truck,
   },
   customers: {
     label: 'Customers',

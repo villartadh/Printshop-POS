@@ -6,6 +6,7 @@ import {
   CheckSquare,
   Edit2,
   History,
+  Printer,
   Search,
   Trash2,
   X,
@@ -46,6 +47,7 @@ export interface InventoryTableProps {
     minimumThreshold: number,
   ) => Promise<void> | void;
   onBulkUpdate?: (payload: BulkInventoryUpdatePayload) => Promise<InventoryItem[] | void> | void;
+  onPrintLabels?: (items: InventoryItem[]) => void;
   onRowClick?: (item: InventoryItem) => void;
   sortKey?: InventorySortField;
   sortDir?: InventorySortDirection;
@@ -74,6 +76,7 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
   onViewMovements,
   onUpdateMinimumThreshold,
   onBulkUpdate,
+  onPrintLabels,
   onRowClick,
   sortKey = 'name',
   sortDir = 'asc',
@@ -718,7 +721,7 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
       },
     ];
 
-    if (!canEdit) {
+    if (!canEdit && !onPrintLabels) {
       return baseColumns;
     }
 
@@ -766,6 +769,7 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
     onAdjustStock,
     onDelete,
     onEdit,
+    onPrintLabels,
     onSortChange,
     onUpdateMinimumThreshold,
     onViewMovements,
@@ -859,6 +863,20 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
               </div>
 
               {toolbarExtras}
+
+              {onPrintLabels && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={displayedItems.length === 0}
+                  onClick={() => onPrintLabels(displayedItems)}
+                  title="Print barcode labels for listed inventory items"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Print Labels
+                </Button>
+              )}
             </div>
 
             <div className="text-xs text-[var(--pos-text-muted)] font-mono-num whitespace-nowrap shrink-0">
@@ -868,7 +886,7 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
         </div>
       )}
 
-      {canEdit && selectedIds.size > 0 && (
+      {(canEdit || onPrintLabels) && selectedIds.size > 0 && (
         <div
           role="region"
           aria-label="Bulk inventory actions"
@@ -892,6 +910,21 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
                   Select all {displayedItems.length}
                 </button>
               )}
+              {onPrintLabels && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    onPrintLabels(
+                      displayedItems.filter((item) => selectedIds.has(item.id)),
+                    )
+                  }
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Print Labels ({selectedIds.size})
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="ghost"
@@ -904,55 +937,57 @@ export const InventoryTable: React.FC<InventoryTableProps> = ({
               </Button>
             </div>
 
-            <form
-              onSubmit={handleApplyBulkUpdate}
-              className="flex flex-wrap items-center gap-2 flex-1 justify-end min-w-[260px]"
-            >
-              <div className="w-full sm:w-48">
-                <Select
-                  aria-label="Bulk update supply category"
-                  value={bulkCategoryId}
-                  disabled={bulkSubmitting}
-                  onChange={(e) => setBulkCategoryId(e.target.value)}
-                  options={[
-                    { value: '', label: 'Supply Category (No change)' },
-                    ...supplyCategories.map((sc) => ({
-                      value: sc.id,
-                      label: sc.name,
-                    })),
-                  ]}
-                />
-              </div>
-
-              <div className="w-full sm:w-52">
-                <Input
-                  aria-label="Bulk update supplier"
-                  placeholder="Set supplier (optional)..."
-                  value={bulkSupplier}
-                  disabled={bulkSubmitting}
-                  list={supplierDatalistId}
-                  onChange={(e) => setBulkSupplier(e.target.value)}
-                />
-                <datalist id={supplierDatalistId}>
-                  {supplierSuggestions.map((supName) => (
-                    <option key={supName} value={supName} />
-                  ))}
-                </datalist>
-              </div>
-
-              <Button
-                type="submit"
-                size="sm"
-                loading={bulkSubmitting}
-                disabled={
-                  bulkSubmitting ||
-                  !onBulkUpdate ||
-                  (!bulkCategoryId && !bulkSupplier.trim())
-                }
+            {canEdit && (
+              <form
+                onSubmit={handleApplyBulkUpdate}
+                className="flex flex-wrap items-center gap-2 flex-1 justify-end min-w-[260px]"
               >
-                Apply Updates
-              </Button>
-            </form>
+                <div className="w-full sm:w-48">
+                  <Select
+                    aria-label="Bulk update supply category"
+                    value={bulkCategoryId}
+                    disabled={bulkSubmitting}
+                    onChange={(e) => setBulkCategoryId(e.target.value)}
+                    options={[
+                      { value: '', label: 'Supply Category (No change)' },
+                      ...supplyCategories.map((sc) => ({
+                        value: sc.id,
+                        label: sc.name,
+                      })),
+                    ]}
+                  />
+                </div>
+
+                <div className="w-full sm:w-52">
+                  <Input
+                    aria-label="Bulk update supplier"
+                    placeholder="Set supplier (optional)..."
+                    value={bulkSupplier}
+                    disabled={bulkSubmitting}
+                    list={supplierDatalistId}
+                    onChange={(e) => setBulkSupplier(e.target.value)}
+                  />
+                  <datalist id={supplierDatalistId}>
+                    {supplierSuggestions.map((supName) => (
+                      <option key={supName} value={supName} />
+                    ))}
+                  </datalist>
+                </div>
+
+                <Button
+                  type="submit"
+                  size="sm"
+                  loading={bulkSubmitting}
+                  disabled={
+                    bulkSubmitting ||
+                    !onBulkUpdate ||
+                    (!bulkCategoryId && !bulkSupplier.trim())
+                  }
+                >
+                  Apply Updates
+                </Button>
+              </form>
+            )}
           </div>
 
           {bulkError && (

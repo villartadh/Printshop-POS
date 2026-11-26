@@ -33,7 +33,7 @@ export const Modal: React.FC<{
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-[2px] p-4"
+      className="pos-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-[2px] p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -42,7 +42,7 @@ export const Modal: React.FC<{
         role="dialog"
         aria-modal="true"
         style={{ borderRadius: 'calc(var(--pos-radius) + 4px)' }}
-        className={`w-full ${widthCls} max-h-[90dvh] flex flex-col bg-[var(--pos-surface)] border border-[var(--pos-border)] shadow-xl overflow-hidden`}
+        className={`pos-modal-dialog w-full ${widthCls} max-h-[90dvh] flex flex-col bg-[var(--pos-surface)] border border-[var(--pos-border)] shadow-xl overflow-hidden`}
       >
         <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-[var(--pos-border)]">
           <div className="min-w-0">
@@ -60,7 +60,7 @@ export const Modal: React.FC<{
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        <div className="pos-modal-body flex-1 overflow-y-auto px-5 py-4">{children}</div>
         {footer && (
           <div className="px-5 py-3.5 border-t border-[var(--pos-border)] bg-slate-50/70 dark:bg-slate-900/50 flex items-center justify-end gap-2.5">
             {footer}

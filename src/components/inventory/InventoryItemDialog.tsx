@@ -1,7 +1,10 @@
-import React, { useEffect, useId, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Pencil, RotateCcw, Sparkles } from 'lucide-react';
 import { DEFAULT_SUPPLY_CATEGORIES } from '../../shared/defaults.ts';
 import {
   extractSupplierInfo,
+  findDuplicateSkuItem,
+  generateUniqueInventorySku,
   getInventoryStockStatus,
   isBelowMinimumThreshold,
   resolveSupplyCategory,
@@ -41,6 +44,7 @@ export interface InventoryItemDialogProps {
   open: boolean;
   onClose: () => void;
   item?: InventoryItem | null;
+  existingItems?: InventoryItem[];
   supplyCategories?: SupplyCategory[];
   currencySymbol?: string;
   onSave: (
@@ -53,15 +57,18 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
   open,
   onClose,
   item = null,
+  existingItems = [],
   supplyCategories = DEFAULT_SUPPLY_CATEGORIES,
   currencySymbol = '₱',
   onSave,
 }) => {
   const formId = useId();
+  const skuInputRef = useRef<HTMLInputElement>(null);
   const isEditing = Boolean(item);
 
   const [name, setName] = useState('');
   const [sku, setSku] = useState('');
+  const [skuOverride, setSkuOverride] = useState(false);
   const [barcode, setBarcode] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState('sup-cat-paper');
   const [categoryName, setCategoryName] = useState('Paper');
@@ -99,6 +106,7 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
       const sup = extractSupplierInfo(item);
       setName(item.name);
       setSku(item.sku);
+      setSkuOverride(true);
       setBarcode(item.barcode || '');
       setSelectedCategoryId(matched?.id || 'custom');
       setCategoryName(item.category);
@@ -120,6 +128,7 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
       const firstCat = supplyCategories[0];
       setName('');
       setSku('');
+      setSkuOverride(false);
       setBarcode('');
       setSelectedCategoryId(firstCat?.id || 'sup-cat-paper');
       setCategoryName(firstCat?.name || 'Paper');
@@ -151,6 +160,74 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
         setUnit(matched.defaultUnit);
       }
     }
+  };
+
+  const suggestedSkuResult = useMemo(() => {
+    const resolvedCat =
+      selectedCategoryId === 'custom'
+        ? undefined
+        : resolveSupplyCategory(supplyCategories, selectedCategoryId);
+    return generateUniqueInventorySku({
+      categoryId: selectedCategoryId === 'custom' ? undefined : selectedCategoryId,
+      categoryName:
+        selectedCategoryId === 'custom'
+          ? categoryName
+          : resolvedCat?.name || categoryName,
+      supplier,
+      existingItems,
+      excludeItemId: item?.id,
+    });
+  }, [
+    selectedCategoryId,
+    categoryName,
+    supplier,
+    supplyCategories,
+    existingItems,
+    item?.id,
+  ]);
+
+  const effectiveSku = skuOverride ? sku : suggestedSkuResult.sku;
+
+  const duplicateSkuItem = useMemo(
+    () => findDuplicateSkuItem(effectiveSku, existingItems, item?.id),
+    [effectiveSku, existingItems, item?.id],
+  );
+
+  const knownSuppliers = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const existing of existingItems) {
+      const supName = extractSupplierInfo(existing).name.trim();
+      if (supName && !map.has(supName.toLowerCase())) {
+        map.set(supName.toLowerCase(), supName);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+  }, [existingItems]);
+
+  const enableManualSkuOverride = () => {
+    setSku(suggestedSkuResult.sku);
+    setSkuOverride(true);
+    setFieldErrors((prev) => {
+      if (!prev.sku) return prev;
+      const next = { ...prev };
+      delete next.sku;
+      return next;
+    });
+    window.setTimeout(() => {
+      skuInputRef.current?.focus();
+      skuInputRef.current?.select();
+    }, 0);
+  };
+
+  const resetToAutoSku = () => {
+    setSku(suggestedSkuResult.sku);
+    setSkuOverride(false);
+    setFieldErrors((prev) => {
+      if (!prev.sku) return prev;
+      const next = { ...prev };
+      delete next.sku;
+      return next;
+    });
   };
 
   const parsedQty = Math.max(0, Number(quantityOnHand) || 0);
@@ -187,8 +264,18 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
     const numReorderQty = Number(reorderQuantity);
     const numCost = Number(unitCost);
     const numLeadTime = Number(leadTimeDays);
+    const finalSku = skuOverride
+      ? item && effectiveSku.trim() === item.sku
+        ? item.sku
+        : effectiveSku.trim().toUpperCase()
+      : effectiveSku.trim();
 
     if (!name.trim()) nextErrors.name = 'Item name is required.';
+    if (!finalSku) {
+      nextErrors.sku = 'Product SKU is required (or switch back to Auto).';
+    } else if (duplicateSkuItem) {
+      nextErrors.sku = `SKU "${finalSku}" is already assigned to "${duplicateSkuItem.name}".`;
+    }
     if (!unit.trim()) nextErrors.unit = 'Unit is required.';
     if (selectedCategoryId === 'custom' && !categoryName.trim()) {
       nextErrors.categoryName = 'Category name is required.';
@@ -245,7 +332,7 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
 
       const payload: InventoryItemFormValues = {
         name: name.trim(),
-        sku: sku.trim() || `MAT-${Date.now().toString().slice(-4)}`,
+        sku: finalSku,
         barcode: barcode.trim(),
         categoryId: resolvedCatId,
         category: categoryName.trim() || 'Supplies',
@@ -277,6 +364,12 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
       setSubmitting(false);
     }
   };
+
+  const skuError =
+    fieldErrors.sku ||
+    (duplicateSkuItem
+      ? `SKU "${effectiveSku.trim()}" is already used by "${duplicateSkuItem.name}".`
+      : undefined);
 
   return (
     <Modal
@@ -354,22 +447,13 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
               error={fieldErrors.name}
               required
             />
-            <div className="grid grid-cols-2 gap-2.5">
-              <Input
-                id={`${formId}-sku`}
-                label="SKU"
-                placeholder="Auto if blank"
-                value={sku}
-                onChange={(e) => setSku(e.target.value)}
-              />
-              <Input
-                id={`${formId}-barcode`}
-                label="Barcode (Optional)"
-                placeholder="EAN / UPC"
-                value={barcode}
-                onChange={(e) => setBarcode(e.target.value)}
-              />
-            </div>
+            <Input
+              id={`${formId}-barcode`}
+              label="Barcode (Optional)"
+              placeholder="EAN / UPC"
+              value={barcode}
+              onChange={(e) => setBarcode(e.target.value)}
+            />
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -416,6 +500,94 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
               required
             />
           )}
+
+          {/* Product SKU Generator & Manual Override */}
+          <div
+            style={{ borderRadius: 'var(--pos-radius)' }}
+            className="p-3 border border-[var(--pos-border)] bg-[var(--pos-bg)]/60 space-y-2"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label
+                htmlFor={`${formId}-sku`}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--pos-text)]"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-[var(--pos-primary)]" />
+                <span>Product SKU</span>
+                <span className="text-[11px] font-normal text-[var(--pos-text-muted)]">
+                  · {skuOverride ? 'Manual Override' : 'Auto-Suggested'}
+                </span>
+              </label>
+
+              <div className="flex items-center gap-2">
+                {skuOverride ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={resetToAutoSku}
+                    title={`Apply suggested SKU (${suggestedSkuResult.sku})`}
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Use Auto ({suggestedSkuResult.sku})
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={enableManualSkuOverride}
+                  >
+                    <Pencil className="w-3 h-3" />
+                    Manual Override
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            <input
+              ref={skuInputRef}
+              id={`${formId}-sku`}
+              type="text"
+              value={effectiveSku}
+              onChange={(e) => {
+                setSkuOverride(true);
+                setSku(e.target.value);
+                setFieldErrors((prev) => {
+                  if (!prev.sku) return prev;
+                  const next = { ...prev };
+                  delete next.sku;
+                  return next;
+                });
+              }}
+              onBlur={() => {
+                if (skuOverride && (!item || sku.trim() !== item.sku)) {
+                  setSku((prev) => prev.trim().toUpperCase());
+                }
+              }}
+              placeholder={suggestedSkuResult.sku}
+              style={{ borderRadius: 'var(--pos-radius)' }}
+              className={`w-full min-h-[38px] bg-[var(--pos-surface)] border px-3 py-1.5 text-sm font-mono-num uppercase tracking-wide text-[var(--pos-text)] placeholder:text-[var(--pos-text-muted)]/60 focus:outline-none focus:ring-2 transition-colors ${
+                skuError
+                  ? 'border-[#DC2626] focus:border-[#DC2626] focus:ring-[#DC2626]/15'
+                  : 'border-[var(--pos-border)] focus:border-[var(--pos-primary)] focus:ring-[var(--pos-primary)]/15'
+              }`}
+            />
+
+            {skuError ? (
+              <p className="text-xs text-[#DC2626]">{skuError}</p>
+            ) : (
+              <p className="text-[11px] text-[var(--pos-text-muted)] font-mono-num">
+                Pattern: {suggestedSkuResult.categoryCode} (Category) ·{' '}
+                {suggestedSkuResult.supplierCode} (Supplier) · #
+                {String(suggestedSkuResult.sequence).padStart(3, '0')}
+                <span className="font-sans">
+                  {skuOverride
+                    ? ' — Custom SKU locked until you click Use Auto'
+                    : ' — Updates automatically with Supply Category & Supplier'}
+                </span>
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Section 2: Stock Counts & Thresholds */}
@@ -509,13 +681,22 @@ export const InventoryItemDialog: React.FC<InventoryItemDialogProps> = ({
           </h3>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              id={`${formId}-supplier`}
-              label="Supplier Name"
-              placeholder="e.g. Metro Paper & Vinyl Supply"
-              value={supplier}
-              onChange={(e) => setSupplier(e.target.value)}
-            />
+            <div>
+              <Input
+                id={`${formId}-supplier`}
+                label="Supplier Name"
+                list={`${formId}-suppliers`}
+                placeholder="e.g. Metro Paper & Vinyl Supply"
+                hint={`SKU supplier code: ${suggestedSkuResult.supplierCode}`}
+                value={supplier}
+                onChange={(e) => setSupplier(e.target.value)}
+              />
+              <datalist id={`${formId}-suppliers`}>
+                {knownSuppliers.map((supName) => (
+                  <option key={supName} value={supName} />
+                ))}
+              </datalist>
+            </div>
             <Input
               id={`${formId}-supplier-contact`}
               label="Supplier Contact (Phone / Email)"

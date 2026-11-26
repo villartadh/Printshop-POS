@@ -5,7 +5,9 @@ import {
   Check,
   CheckCheck,
   ClipboardList,
+  Clock,
   PackageOpen,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { Button } from '../ui/Primitives.tsx';
@@ -20,6 +22,11 @@ export const NotificationCenter: React.FC = () => {
     markNotificationRead,
     markAllNotificationsRead,
     openReorderRequestModal,
+    activeCriticalSystemAlerts,
+    criticalAlertConfig,
+    openAlertSettingsModal,
+    acknowledgeCriticalAlert,
+    acknowledgeAllCriticalAlerts,
     setActiveModule,
   } = useApp();
 
@@ -58,6 +65,11 @@ export const NotificationCenter: React.FC = () => {
         ? belowMinimumItems.length
         : 0;
 
+  const hasCriticalHighlight =
+    hasSimultaneousThresholdBreach || activeCriticalSystemAlerts.length > 0;
+  const totalAlertEntries =
+    inventoryNotifications.length + activeCriticalSystemAlerts.length;
+
   return (
     <div className="relative" ref={containerRef}>
       <button
@@ -68,11 +80,11 @@ export const NotificationCenter: React.FC = () => {
         aria-label={
           hasSimultaneousThresholdBreach
             ? `Notification Center: ${belowMinimumItems.length} items below minimum threshold`
-            : `Notification Center (${inventoryNotifications.length} alerts)`
+            : `Notification Center (${totalAlertEntries} alerts)`
         }
         title="Notification Center"
         className={`relative h-9 px-2.5 rounded-lg border flex items-center gap-1.5 text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-          hasSimultaneousThresholdBreach
+          hasCriticalHighlight
             ? 'border-[var(--pos-error)]/40 bg-[var(--pos-error)]/10 text-[var(--pos-error)] hover:bg-[var(--pos-error)]/15'
             : 'border-[var(--pos-border)] text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] hover:bg-slate-50 dark:hover:bg-slate-800'
         }`}
@@ -82,7 +94,7 @@ export const NotificationCenter: React.FC = () => {
         {badgeCount > 0 && (
           <span
             className={`font-mono-num text-[11px] font-bold px-1.5 py-0.5 rounded-md leading-none ${
-              hasSimultaneousThresholdBreach || hasUnread
+              hasCriticalHighlight || hasUnread
                 ? 'bg-[var(--pos-error)] text-white'
                 : 'bg-slate-200 dark:bg-slate-700 text-[var(--pos-text)]'
             }`}
@@ -97,7 +109,7 @@ export const NotificationCenter: React.FC = () => {
           role="dialog"
           aria-label="Notification Center"
           style={{ borderRadius: 'calc(var(--pos-radius) + 2px)' }}
-          className="absolute right-0 mt-1.5 w-[min(92vw,24rem)] max-h-[75dvh] flex flex-col bg-[var(--pos-surface)] border border-[var(--pos-border)] shadow-xl z-50 overflow-hidden"
+          className="absolute right-0 mt-1.5 w-[min(92vw,25rem)] max-h-[75dvh] flex flex-col bg-[var(--pos-surface)] border border-[var(--pos-border)] shadow-xl z-50 overflow-hidden"
         >
           {/* Header */}
           <div className="px-4 py-3 border-b border-[var(--pos-border)] flex items-center justify-between gap-2 shrink-0">
@@ -106,25 +118,99 @@ export const NotificationCenter: React.FC = () => {
                 Notification Center
               </h2>
               <p className="text-[11px] text-[var(--pos-text-muted)] font-mono-num">
-                {inventoryNotifications.length === 0
+                {totalAlertEntries === 0
                   ? 'All stock thresholds healthy'
-                  : `${inventoryNotifications.length} active alert(s) · ${unreadNotificationCount} unread`}
+                  : `${totalAlertEntries} active alert(s) · ${unreadNotificationCount} unread`}
               </p>
             </div>
-            {unreadNotificationCount > 0 && (
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
-                onClick={markAllNotificationsRead}
-                className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--pos-primary)] hover:underline cursor-pointer whitespace-nowrap shrink-0"
+                onClick={() => {
+                  setOpen(false);
+                  openAlertSettingsModal();
+                }}
+                title="Configure Off-Hours & Weekend Alerts"
+                aria-label="Configure Off-Hours & Weekend Alerts"
+                className="p-1.5 rounded-md border border-[var(--pos-border)] text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                <CheckCheck className="w-3.5 h-3.5" />
-                Mark all read
+                <SlidersHorizontal className="w-3.5 h-3.5" />
               </button>
-            )}
+              {unreadNotificationCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    markAllNotificationsRead();
+                    if (activeCriticalSystemAlerts.length > 0) {
+                      void acknowledgeAllCriticalAlerts();
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-[var(--pos-primary)] hover:underline cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  Mark all read
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Body */}
           <div className="flex-1 overflow-y-auto divide-y divide-[var(--pos-border)]">
+            {activeCriticalSystemAlerts.length > 0 && (
+              <div className="p-3.5 bg-[var(--pos-error)]/[0.08] space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--pos-error)]">
+                    <Clock className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      Off-Hours &amp; Weekend System Alerts ({activeCriticalSystemAlerts.length})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void acknowledgeAllCriticalAlerts()}
+                    className="text-[11px] font-medium text-[var(--pos-primary)] hover:underline cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    Acknowledge all
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {activeCriticalSystemAlerts.slice(0, 5).map((ev) => (
+                    <div
+                      key={ev.id}
+                      style={{ borderRadius: 'var(--pos-radius)' }}
+                      className="p-2 border border-[var(--pos-border)] bg-[var(--pos-surface)] flex items-start justify-between gap-2 text-[11px]"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold text-[var(--pos-text)] truncate">
+                          {ev.itemName}{' '}
+                          <span className="font-mono-num text-[var(--pos-text-muted)]">
+                            ({ev.sku})
+                          </span>
+                        </div>
+                        <div className="font-mono-num text-[var(--pos-error)] font-semibold">
+                          {ev.quantityOnHand} {ev.unit} on hand (critical &lt;{' '}
+                          {ev.criticalThreshold})
+                        </div>
+                        <div className="text-[var(--pos-text-muted)] truncate mt-0.5">
+                          {ev.windowLabel}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void acknowledgeCriticalAlert(ev.id)}
+                        title="Acknowledge system alert"
+                        aria-label={`Acknowledge ${ev.itemName}`}
+                        className="p-1 rounded text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer shrink-0"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {simultaneousAlert && (
               <div className="p-3.5 bg-[var(--pos-error)]/[0.07] space-y-2.5">
                 <div className="flex items-start justify-between gap-2">
@@ -247,32 +333,32 @@ export const NotificationCenter: React.FC = () => {
                   );
                 })}
               </div>
-            ) : !simultaneousAlert ? (
+            ) : !simultaneousAlert && activeCriticalSystemAlerts.length === 0 ? (
               <div className="px-4 py-8 text-center">
                 <PackageOpen className="w-7 h-7 mx-auto text-[var(--pos-text-muted)] mb-2" />
                 <p className="text-xs font-semibold text-[var(--pos-text)]">
                   No active stock threshold alerts
                 </p>
                 <p className="text-[11px] text-[var(--pos-text-muted)] mt-1">
-                  You will be alerted here when multiple items drop below their minimum threshold simultaneously.
+                  You will be alerted here when items cross critical thresholds or during off-hours &amp; weekend monitoring.
                 </p>
               </div>
             ) : null}
           </div>
 
           {/* Footer */}
-          {inventoryNotifications.length > 0 && (
-            <div className="px-3.5 py-2.5 border-t border-[var(--pos-border)] bg-[var(--pos-bg)] flex items-center justify-between gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  setOpen(false);
-                  setActiveModule('inventory');
-                }}
-                className="text-xs font-medium text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] cursor-pointer"
-              >
-                Open Inventory Module
-              </button>
+          <div className="px-3.5 py-2.5 border-t border-[var(--pos-border)] bg-[var(--pos-bg)] flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                openAlertSettingsModal();
+              }}
+              className="text-xs font-medium text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] cursor-pointer"
+            >
+              Off-Hours Rules ({criticalAlertConfig.enabled ? 'On' : 'Paused'})
+            </button>
+            {inventoryNotifications.length > 0 ? (
               <button
                 type="button"
                 onClick={() => {
@@ -285,8 +371,19 @@ export const NotificationCenter: React.FC = () => {
               >
                 Reorder Request List →
               </button>
-            </div>
-          )}
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  setActiveModule('inventory');
+                }}
+                className="text-xs font-medium text-[var(--pos-primary)] hover:underline cursor-pointer"
+              >
+                Open Inventory →
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

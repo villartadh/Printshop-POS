@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { AlertTriangle, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { AlertTriangle, BellRing, Plus, RefreshCw, ScanBarcode, Search, Trash2, Truck, Upload, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import {
@@ -9,6 +9,7 @@ import {
   isBelowMinimumThreshold,
   STOCK_MOVEMENT_LABELS,
 } from '../../shared/inventoryModel.ts';
+import { computePredictiveReorderForecasts } from '../../shared/predictiveReorderEngine.ts';
 import type {
   InventoryItem,
   InventoryItemType,
@@ -24,10 +25,14 @@ import {
   InventoryItemDialog,
   type InventoryItemFormValues,
 } from '../../components/inventory/InventoryItemDialog.tsx';
+import { InventoryLabelPrintModal } from '../../components/inventory/InventoryLabelPrintModal.tsx';
 import { InventoryTable } from '../../components/inventory/InventoryTable.tsx';
+import { PredictiveReorderPanel } from '../../components/inventory/PredictiveReorderPanel.tsx';
 import { StockMovementModal } from '../../components/inventory/StockMovementModal.tsx';
+import { SupplierCsvImportModal } from '../../components/inventory/SupplierCsvImportModal.tsx';
+import { BarcodeReceivingScannerModal } from '../../components/inventory/BarcodeReceivingScannerModal.tsx';
 
-type InventoryTab = 'items' | 'low_stock' | 'movements';
+type InventoryTab = 'items' | 'low_stock' | 'forecast' | 'movements';
 type InventorySortKey = Extract<
   InventorySortField,
   'name' | 'quantityOnHand' | 'reorderLevel' | 'unitCost' | 'status'
@@ -44,14 +49,20 @@ export const InventoryModule: React.FC = () => {
     session,
     settings,
     inventoryState,
+    transactions,
+    services,
     loadInventory,
     createInventoryItem,
     updateInventoryItem,
     bulkUpdateInventoryItems,
+    importSupplierMappings,
     deleteInventoryItem,
     trackStockChange,
     getInventoryItemById,
     getItemStockMovements,
+    setActiveModule,
+    openAlertSettingsModal,
+    activeCriticalSystemAlerts,
     notify,
   } = useApp();
 
@@ -85,6 +96,9 @@ export const InventoryModule: React.FC = () => {
   const [adjustTarget, setAdjustTarget] = useState<InventoryItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<InventoryItem | null>(null);
   const [detailItemId, setDetailItemId] = useState<string | null>(null);
+  const [labelPrintTargets, setLabelPrintTargets] = useState<InventoryItem[] | null>(null);
+  const [supplierCsvOpen, setSupplierCsvOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -108,6 +122,16 @@ export const InventoryModule: React.FC = () => {
     [inventory],
   );
   const finishedCount = inventory.length - consumableCount;
+  const nearingThresholdCount = useMemo(
+    () =>
+      computePredictiveReorderForecasts({
+        inventory,
+        transactions,
+        services,
+        stockMovements,
+      }).filter((f) => f.isNearingThreshold).length,
+    [inventory, transactions, services, stockMovements],
+  );
 
   const hasActiveFilters =
     search.trim().length > 0 ||
@@ -312,7 +336,7 @@ export const InventoryModule: React.FC = () => {
             Monitor live stock counts, reorder thresholds, supplier records, and usage movements
           </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Button
             variant="outline"
             size="sm"
@@ -323,11 +347,54 @@ export const InventoryModule: React.FC = () => {
             <RefreshCw className={`w-3.5 h-3.5 ${loadingInventory ? 'animate-spin' : ''}`} />
             {loadingInventory ? 'Refreshing...' : 'Refresh'}
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="whitespace-nowrap shrink-0"
+            onClick={() => setScannerOpen(true)}
+          >
+            <ScanBarcode className="w-3.5 h-3.5" />
+            Scan &amp; Receive
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="whitespace-nowrap shrink-0"
+            onClick={openAlertSettingsModal}
+          >
+            <BellRing className="w-3.5 h-3.5" />
+            Off-Hours Alerts
+            {activeCriticalSystemAlerts.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 text-[10px] font-mono-num font-bold rounded bg-[var(--pos-error)] text-white leading-none">
+                {activeCriticalSystemAlerts.length}
+              </span>
+            )}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="whitespace-nowrap shrink-0"
+            onClick={() => setActiveModule('suppliers')}
+          >
+            <Truck className="w-3.5 h-3.5" />
+            Suppliers
+          </Button>
           {canEditCatalog && (
-            <Button size="sm" className="whitespace-nowrap shrink-0" onClick={openNewItemModal}>
-              <Plus className="w-4 h-4" />
-              Add Material / Product
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                className="whitespace-nowrap shrink-0"
+                onClick={() => setSupplierCsvOpen(true)}
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Import Suppliers CSV
+              </Button>
+              <Button size="sm" className="whitespace-nowrap shrink-0" onClick={openNewItemModal}>
+                <Plus className="w-4 h-4" />
+                Add Material / Product
+              </Button>
+            </>
           )}
         </div>
       </div>
@@ -428,6 +495,19 @@ export const InventoryModule: React.FC = () => {
           <button
             type="button"
             role="tab"
+            aria-selected={tab === 'forecast'}
+            onClick={() => setTab('forecast')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+              tab === 'forecast'
+                ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
+                : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+            }`}
+          >
+            Predictive Reorder ({nearingThresholdCount})
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === 'movements'}
             onClick={() => setTab('movements')}
             className={`px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
@@ -461,9 +541,13 @@ export const InventoryModule: React.FC = () => {
               </button>
             )}
           </div>
+        ) : tab === 'forecast' ? (
+          <span className="text-xs text-[var(--pos-text-muted)]">
+            Sales velocity-backed reorder recommendations
+          </span>
         ) : (
           <span className="text-xs text-[var(--pos-text-muted)]">
-            Click any row to inspect supplier details & movement history
+            Click any row to inspect supplier details &amp; movement history
           </span>
         )}
       </div>
@@ -471,6 +555,11 @@ export const InventoryModule: React.FC = () => {
       {/* Main Content Area */}
       {loadingInventory && inventory.length === 0 ? (
         <LoadingState rows={6} />
+      ) : tab === 'forecast' ? (
+        <PredictiveReorderPanel
+          onAdjustStock={openAdjustModal}
+          onInspectItem={(item) => setDetailItemId(item.id)}
+        />
       ) : tab === 'movements' ? (
         <DataTable
           rows={filteredMovements}
@@ -559,6 +648,7 @@ export const InventoryModule: React.FC = () => {
               : undefined
           }
           onBulkUpdate={bulkUpdateInventoryItems}
+          onPrintLabels={(targets) => setLabelPrintTargets(targets)}
           onRowClick={(item) => setDetailItemId(item.id)}
           sortKey={sortKey}
           sortDir={sortDir}
@@ -655,9 +745,41 @@ export const InventoryModule: React.FC = () => {
           setEditingItem(null);
         }}
         item={editingItem}
+        existingItems={inventory}
         supplyCategories={supplyCategories}
         currencySymbol={taxCurr.currencySymbol}
         onSave={handleSaveItem}
+      />
+
+      {/* Printable Barcode Label Sheet Modal */}
+      <InventoryLabelPrintModal
+        open={Boolean(labelPrintTargets)}
+        onClose={() => setLabelPrintTargets(null)}
+        items={labelPrintTargets ?? []}
+        allInventory={inventory}
+        taxAndCurrency={taxCurr}
+        businessName={settings.branding.businessName}
+      />
+
+      {/* Supplier CSV Upload & Auto-Mapping Modal */}
+      <SupplierCsvImportModal
+        open={supplierCsvOpen}
+        onClose={() => setSupplierCsvOpen(false)}
+        inventory={inventory}
+        taxAndCurrency={taxCurr}
+        onApplyMappings={importSupplierMappings}
+      />
+
+      {/* Barcode / QR Camera Scanner Receiving Modal */}
+      <BarcodeReceivingScannerModal
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        inventory={inventory}
+        taxAndCurrency={taxCurr}
+        canEditCatalog={canEditCatalog}
+        onAdjustStock={trackStockChange}
+        onAssignBarcode={(itemId, barcode) => updateInventoryItem(itemId, { barcode })}
+        onNotify={notify}
       />
 
       {/* Stock Adjustment Modal */}

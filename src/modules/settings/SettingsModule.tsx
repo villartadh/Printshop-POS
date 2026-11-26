@@ -27,6 +27,7 @@ const MODULE_LABELS: Record<ModuleId, string> = {
   jobs: 'Print Jobs',
   services: 'Services & Pricing',
   inventory: 'Inventory',
+  suppliers: 'Supplier Management',
   customers: 'Customers',
   finance: 'Expenses & Reports',
   shifts: 'Cashier Shifts',

@@ -83,8 +83,14 @@ body {
   background: rgba(100, 116, 139, 0.45);
 }
 
-/* Print styles for 58mm, 80mm, A4, Letter receipts and reports */
+/* Print styles for 58mm, 80mm, A4, Letter receipts, labels, and reports */
 @media print {
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+  }
   body * {
     visibility: hidden !important;
   }
@@ -103,5 +109,25 @@ body {
     border: none !important;
     margin: 0 !important;
     padding: 8px !important;
+    overflow: visible !important;
+  }
+  .pos-modal-backdrop,
+  .pos-modal-dialog,
+  .pos-modal-body {
+    position: static !important;
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    transform: none !important;
+    backdrop-filter: none !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .break-inside-avoid {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
   }
 }

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { isBelowMinimumThreshold } from '../../shared/inventoryModel.ts';
+import { computePredictiveReorderForecasts } from '../../shared/predictiveReorderEngine.ts';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import type { Transaction } from '../../shared/types.ts';
 import { Button, Card, StatusIndicator } from '../../components/ui/Primitives.tsx';
@@ -26,6 +27,8 @@ export const DashboardModule: React.FC = () => {
     transactions,
     printJobs,
     inventory,
+    services,
+    stockMovements,
     expenses,
     customers,
     setActiveModule,
@@ -155,6 +158,27 @@ export const DashboardModule: React.FC = () => {
       paymentBreakdown,
     };
   }, [validSales, expenses, customers, printJobs, inventory, range]);
+
+  const predictiveForecasts = useMemo(
+    () =>
+      computePredictiveReorderForecasts({
+        inventory,
+        transactions,
+        services,
+        stockMovements,
+      }),
+    [inventory, transactions, services, stockMovements],
+  );
+
+  const nearingForecasts = useMemo(
+    () => predictiveForecasts.filter((f) => f.isNearingThreshold),
+    [predictiveForecasts],
+  );
+
+  const forecastMap = useMemo(
+    () => new Map(predictiveForecasts.map((f) => [f.inventoryItemId, f])),
+    [predictiveForecasts],
+  );
 
   const toggleWidget = async (id: string) => {
     const nextWidgets = settings.dashboardWidgets.map((w) =>
@@ -420,20 +444,32 @@ export const DashboardModule: React.FC = () => {
         }
 
         if (widget.id === 'low_stock') {
+          const displayedAlerts =
+            nearingForecasts.length > 0
+              ? nearingForecasts
+              : metrics.lowStockItems.map((item) => forecastMap.get(item.id)).filter(Boolean);
+
           return (
             <Card key={widget.id}>
               <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                <h2 className="text-sm font-semibold text-[var(--pos-text)]">
-                  Low-Stock Printing Materials ({metrics.lowStockItems.length})
-                </h2>
+                <div>
+                  <h2 className="text-sm font-semibold text-[var(--pos-text)]">
+                    Predictive Reorder &amp; Low-Stock Alerts ({displayedAlerts.length})
+                  </h2>
+                  <p className="text-[11px] text-[var(--pos-text-muted)]">
+                    Velocity-based reorder suggestions for items nearing or below threshold
+                  </p>
+                </div>
                 <div className="flex items-center gap-1.5">
-                  {metrics.lowStockItems.length > 0 && (
+                  {displayedAlerts.length > 0 && (
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() =>
                         openReorderRequestModal(
-                          belowMinimumItems.length > 0 ? 'below_minimum' : 'all_low_stock',
+                          belowMinimumItems.length >= 2
+                            ? 'below_minimum'
+                            : 'nearing_threshold',
                         )
                       }
                     >
@@ -446,36 +482,56 @@ export const DashboardModule: React.FC = () => {
                   </Button>
                 </div>
               </div>
-              {metrics.lowStockItems.length === 0 ? (
+              {displayedAlerts.length === 0 ? (
                 <p className="text-xs text-[var(--pos-text-muted)] py-3">
-                  All consumables and supplies are above reorder thresholds.
+                  All consumables and supplies have healthy runway above reorder thresholds.
                 </p>
               ) : (
                 <div className="divide-y divide-[var(--pos-border)]">
-                  {metrics.lowStockItems.map((item) => {
-                    const isBelowMin = isBelowMinimumThreshold(item);
-                    const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
+                  {displayedAlerts.map((f) => {
+                    if (!f) return null;
                     return (
-                      <div key={item.id} className="py-2 flex items-center justify-between gap-3">
+                      <div
+                        key={f.inventoryItemId}
+                        className="py-2.5 flex flex-wrap items-center justify-between gap-3"
+                      >
                         <div className="min-w-0">
                           <div className="text-sm font-medium text-[var(--pos-text)] truncate">
-                            {item.name}
+                            {f.name}
                           </div>
                           <div className="text-xs text-[var(--pos-text-muted)] font-mono-num">
-                            {item.sku} · Reorder at {item.reorderLevel} {item.unit}
-                            {minThreshold > 0 ? ` · Min ${minThreshold} ${item.unit}` : ''}
+                            {f.sku} · Reorder {f.reorderLevel} {f.unit}
+                            {f.minimumThreshold > 0 ? ` · Min ${f.minimumThreshold} ${f.unit}` : ''}
+                            {f.weightedDailyVelocity > 0
+                              ? ` · ${f.weightedDailyVelocity}/day (${
+                                  f.daysUntilStockout !== null ? `~${f.daysUntilStockout}d left` : 'active'
+                                })`
+                              : ''}
                           </div>
                         </div>
-                        <StatusIndicator
-                          tone={item.quantityOnHand <= 0 || isBelowMin ? 'error' : 'warning'}
-                          label={
-                            item.quantityOnHand <= 0
-                              ? `Out of stock (${item.quantityOnHand} ${item.unit})`
-                              : isBelowMin
-                                ? `Below min (${item.quantityOnHand} ${item.unit})`
-                                : `${item.quantityOnHand} ${item.unit}`
-                          }
-                        />
+                        <div className="flex items-center gap-3 shrink-0">
+                          {f.suggestedOrderQty > 0 && (
+                            <span className="text-xs font-mono-num font-semibold text-[var(--pos-primary)]">
+                              Suggest +{f.suggestedOrderQty} {f.unit}
+                            </span>
+                          )}
+                          <StatusIndicator
+                            tone={
+                              f.currentStock <= 0 || f.isBelowMinimum
+                                ? 'error'
+                                : 'warning'
+                            }
+                            label={
+                              f.currentStock <= 0
+                                ? `Out of stock (${f.currentStock} ${f.unit})`
+                                : f.isBelowMinimum
+                                  ? `Below min (${f.currentStock} ${f.unit})`
+                                  : f.isAtReorder
+                                    ? `Low (${f.currentStock} ${f.unit})`
+                                    : `${f.daysUntilThreshold ?? 0}d to threshold (${f.currentStock} ${f.unit})`
+                            }
+                          />
+                        </div>
                       </div>
                     );
                   })}

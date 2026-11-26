@@ -6,6 +6,7 @@ import {
   Receipt,
   Search,
   Tag,
+  Truck,
   User,
   X,
 } from 'lucide-react';
@@ -16,7 +17,7 @@ import { MODULE_META } from './navigationMeta.ts';
 
 interface SearchEntry {
   id: string;
-  category: 'Module' | 'Service' | 'Inventory' | 'Print Job' | 'Customer' | 'Receipt';
+  category: 'Module' | 'Service' | 'Inventory' | 'Supplier' | 'Print Job' | 'Customer' | 'Receipt';
   title: string;
   subtitle: string;
   rightText?: string;
@@ -35,7 +36,7 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
   onNavigate,
 }) => {
   const { settings } = useAppState();
-  const { services, inventory, printJobs, customers, transactions } = useApp();
+  const { services, inventory, suppliers, printJobs, customers, transactions } = useApp();
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -187,8 +188,46 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
       }
     }
 
+    const seenSuppliers = new Set<string>();
+    for (const sup of suppliers) {
+      const key = sup.name.trim().toLowerCase();
+      if (!key) continue;
+      seenSuppliers.add(key);
+      if (
+        sup.name.toLowerCase().includes(q) ||
+        (sup.contactPerson || '').toLowerCase().includes(q) ||
+        (sup.phone || '').toLowerCase().includes(q) ||
+        (sup.email || '').toLowerCase().includes(q) ||
+        (sup.paymentTerms || '').toLowerCase().includes(q)
+      ) {
+        list.push({
+          id: `sup-${sup.id}`,
+          category: 'Supplier',
+          title: sup.name,
+          subtitle: `${sup.contactPerson || sup.phone || sup.email || 'Vendor'} · ${sup.defaultLeadTimeDays}d lead`,
+          rightText: sup.paymentTerms || undefined,
+          targetModule: 'suppliers',
+        });
+      }
+    }
+    for (const item of inventory) {
+      const supName = (item.supplier || '').trim();
+      const key = supName.toLowerCase();
+      if (!key || seenSuppliers.has(key)) continue;
+      seenSuppliers.add(key);
+      if (supName.toLowerCase().includes(q) || (item.supplierContact || '').toLowerCase().includes(q)) {
+        list.push({
+          id: `sup-inv-${key}`,
+          category: 'Supplier',
+          title: supName,
+          subtitle: item.supplierContact || 'Linked inventory supplier',
+          targetModule: 'suppliers',
+        });
+      }
+    }
+
     return list.slice(0, 14);
-  }, [currency, customers, inventory, printJobs, query, services, settings.moduleOrder, transactions, visibleSet]);
+  }, [currency, customers, inventory, printJobs, query, services, settings.moduleOrder, suppliers, transactions, visibleSet]);
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -226,6 +265,8 @@ export const GlobalSearchModal: React.FC<GlobalSearchModalProps> = ({
         return <Tag className="w-4 h-4 text-[var(--pos-primary)]" />;
       case 'Inventory':
         return <Package className="w-4 h-4 text-[var(--pos-primary)]" />;
+      case 'Supplier':
+        return <Truck className="w-4 h-4 text-[var(--pos-primary)]" />;
       case 'Print Job':
         return <ClipboardList className="w-4 h-4 text-[var(--pos-info)]" />;
       case 'Customer':

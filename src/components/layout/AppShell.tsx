@@ -7,11 +7,13 @@ import { TopUtilityBar } from './TopUtilityBar.tsx';
 import { MobileBottomNav } from './MobileBottomNav.tsx';
 import { GlobalSearchModal } from './GlobalSearchModal.tsx';
 import { ReorderRequestModal } from '../inventory/ReorderRequestModal.tsx';
+import { OffHoursAlertSettingsModal } from '../inventory/OffHoursAlertSettingsModal.tsx';
 import { DashboardModule } from '../../modules/dashboard/DashboardModule.tsx';
 import { PosModule } from '../../modules/pos/PosModule.tsx';
 import { PrintJobsModule } from '../../modules/jobs/PrintJobsModule.tsx';
 import { ServicesModule } from '../../modules/services/ServicesModule.tsx';
 import { InventoryModule } from '../../modules/inventory/InventoryModule.tsx';
+import { SuppliersModule } from '../../modules/suppliers/SuppliersModule.tsx';
 import { CustomersModule } from '../../modules/customers/CustomersModule.tsx';
 import { ExpensesReportsModule } from '../../modules/finance/ExpensesReportsModule.tsx';
 import { ShiftsModule } from '../../modules/shifts/ShiftsModule.tsx';
@@ -36,6 +38,8 @@ export const AppShell: React.FC = () => {
     reorderModalOpen,
     reorderModalScope,
     closeReorderRequestModal,
+    alertSettingsModalOpen,
+    closeAlertSettingsModal,
   } = useApp();
 
   const [moreSheetOpen, setMoreSheetOpen] = useState(false);
@@ -96,6 +100,8 @@ export const AppShell: React.FC = () => {
         return <ServicesModule />;
       case 'inventory':
         return <InventoryModule />;
+      case 'suppliers':
+        return <SuppliersModule />;
       case 'customers':
         return <CustomersModule />;
       case 'finance':
@@ -184,6 +190,11 @@ export const AppShell: React.FC = () => {
         open={reorderModalOpen}
         initialScope={reorderModalScope}
         onClose={closeReorderRequestModal}
+      />
+
+      <OffHoursAlertSettingsModal
+        open={alertSettingsModalOpen}
+        onClose={closeAlertSettingsModal}
       />
 
       {toasts.length > 0 && (

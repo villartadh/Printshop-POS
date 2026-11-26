@@ -7,6 +7,8 @@ import type {
   BrandingConfig,
   BulkInventoryUpdatePayload,
   CashierShift,
+  CriticalAlertEvent,
+  CriticalAlertScheduleConfig,
   Customer,
   DesignTokens,
   ExpenseRecord,
@@ -18,16 +20,22 @@ import type {
   PlatformPreviewMode,
   PrintJob,
   PrintService,
+  RecordSupplierOrderPayload,
   ReorderRequestScope,
   ServiceCategory,
   StockAdjustmentPayload,
   StockMovement,
+  SupplierCsvImportPayload,
+  SupplierRecord,
+  SupplierSavePayload,
   SupplyCategory,
   ThemeMode,
   Transaction,
   UserAccount,
 } from '../shared/types.ts';
 import { DEFAULT_SUPPLY_CATEGORIES } from '../shared/defaults.ts';
+import { DEFAULT_CRITICAL_ALERT_CONFIG, normalizeCriticalAlertConfig } from '../shared/criticalAlertSchedule.ts';
+import { normalizeSupplierRecord } from '../shared/supplierModel.ts';
 import {
   buildInventoryAlertNotifications,
   calculateInventoryValuation,
@@ -82,6 +90,7 @@ interface BootstrapPayload {
   supplyCategories?: SupplyCategory[];
   services: PrintService[];
   inventory: InventoryItem[];
+  suppliers?: SupplierRecord[];
   stockMovements: StockMovement[];
   customers: Customer[];
   transactions: Transaction[];
@@ -90,6 +99,9 @@ interface BootstrapPayload {
   shifts: CashierShift[];
   users: UserAccount[];
   auditLogs: AuditLogEntry[];
+  criticalAlertConfig?: CriticalAlertScheduleConfig;
+  criticalAlertEvents?: CriticalAlertEvent[];
+  criticalAlertSmtpConfigured?: boolean;
   serverTime: string;
 }
 
@@ -124,6 +136,7 @@ interface AppContextValue {
   supplyCategories: SupplyCategory[];
   services: PrintService[];
   inventory: InventoryItem[];
+  suppliers: SupplierRecord[];
   inventoryState: InventoryStateSlice;
   stockMovements: StockMovement[];
   customers: Customer[];
@@ -150,6 +163,21 @@ interface AppContextValue {
   reorderModalScope: ReorderRequestScope;
   openReorderRequestModal: (scope?: ReorderRequestScope) => void;
   closeReorderRequestModal: () => void;
+  criticalAlertConfig: CriticalAlertScheduleConfig;
+  criticalAlertEvents: CriticalAlertEvent[];
+  activeCriticalSystemAlerts: CriticalAlertEvent[];
+  criticalAlertSmtpConfigured: boolean;
+  alertSettingsModalOpen: boolean;
+  openAlertSettingsModal: () => void;
+  closeAlertSettingsModal: () => void;
+  refreshCriticalAlerts: () => Promise<void>;
+  saveCriticalAlertConfig: (next: CriticalAlertScheduleConfig) => Promise<CriticalAlertScheduleConfig>;
+  triggerCriticalAlertTest: (simulateOffHours?: boolean) => Promise<{
+    triggeredEvents: CriticalAlertEvent[];
+    skippedReason?: string;
+  }>;
+  acknowledgeCriticalAlert: (eventId: string) => Promise<void>;
+  acknowledgeAllCriticalAlerts: () => Promise<void>;
 
   // Auth Actions
   refreshAuthStatus: () => Promise<void>;
@@ -197,6 +225,10 @@ interface AppContextValue {
   createInventoryItem: (item: Partial<InventoryItem>) => Promise<InventoryItem>;
   updateInventoryItem: (id: string, patch: Partial<InventoryItem>) => Promise<InventoryItem>;
   bulkUpdateInventoryItems: (payload: BulkInventoryUpdatePayload) => Promise<InventoryItem[]>;
+  importSupplierMappings: (payload: SupplierCsvImportPayload) => Promise<InventoryItem[]>;
+  saveSupplier: (payload: SupplierSavePayload) => Promise<SupplierRecord>;
+  deleteSupplier: (id: string) => Promise<void>;
+  recordSupplierOrder: (payload: RecordSupplierOrderPayload) => Promise<StockMovement[]>;
   deleteInventoryItem: (id: string) => Promise<void>;
   trackStockChange: (id: string, payload: StockAdjustmentPayload) => Promise<StockMovement>;
   adjustInventory: (
@@ -256,6 +288,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const [services, setServices] = useState<PrintService[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
   const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [inventoryError, setInventoryError] = useState<string | null>(null);
@@ -284,6 +317,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [reorderModalOpen, setReorderModalOpen] = useState(false);
   const [reorderModalScope, setReorderModalScope] = useState<ReorderRequestScope>('below_minimum');
+  const [criticalAlertConfig, setCriticalAlertConfig] = useState<CriticalAlertScheduleConfig>(
+    DEFAULT_CRITICAL_ALERT_CONFIG,
+  );
+  const [criticalAlertEvents, setCriticalAlertEvents] = useState<CriticalAlertEvent[]>([]);
+  const [criticalAlertSmtpConfigured, setCriticalAlertSmtpConfigured] = useState(false);
+  const [alertSettingsModalOpen, setAlertSettingsModalOpen] = useState(false);
   const prevBreachSignatureRef = useRef<string | null>(null);
 
   const notify = useCallback((text: string, tone: ToastMessage['tone'] = 'info') => {
@@ -314,6 +353,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       setServices(data.services);
       setInventory((data.inventory || []).map((item) => normalizeInventoryItem(item)));
+      setSuppliers(
+        (data.suppliers || []).map((sup) => normalizeSupplierRecord(sup)),
+      );
       setStockMovements(
         (data.stockMovements || []).map((mov) => normalizeStockMovement(mov)),
       );
@@ -326,6 +368,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setShifts(data.shifts);
       setUsers(data.users);
       setAuditLogs(data.auditLogs);
+      if (data.criticalAlertConfig) {
+        setCriticalAlertConfig(normalizeCriticalAlertConfig(data.criticalAlertConfig));
+      }
+      if (Array.isArray(data.criticalAlertEvents)) {
+        setCriticalAlertEvents(data.criticalAlertEvents);
+      }
+      if (typeof data.criticalAlertSmtpConfigured === 'boolean') {
+        setCriticalAlertSmtpConfigured(data.criticalAlertSmtpConfigured);
+      }
     },
     [hasLocalCustomizations, setSettingsState, settings.updatedAt],
   );
@@ -786,6 +837,150 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return normalizedList;
   };
 
+  const importSupplierMappings = async (
+    payload: SupplierCsvImportPayload,
+  ): Promise<InventoryItem[]> => {
+    const res = await apiRequest<{ items: InventoryItem[]; updatedCount: number }>(
+      '/api/inventory/supplier-import',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+    const normalizedList = (res.items || []).map((item) => normalizeInventoryItem(item));
+    const updatedMap = new Map(normalizedList.map((item) => [item.id, item]));
+    const nextItems = inventory.map((item) => updatedMap.get(item.id) ?? item);
+    setInventory(nextItems);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        inventory: nextItems,
+      });
+    }
+
+    notify(`Mapped suppliers to ${normalizedList.length} inventory item(s).`, 'success');
+    return normalizedList;
+  };
+
+  const saveSupplier = async (
+    payload: SupplierSavePayload,
+  ): Promise<SupplierRecord> => {
+    const res = payload.id
+      ? await apiRequest<{ supplier: SupplierRecord; syncedItemsCount?: number }>(
+          `/api/suppliers/${payload.id}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+          },
+        )
+      : await apiRequest<{ supplier: SupplierRecord; syncedItemsCount?: number }>(
+          '/api/suppliers',
+          {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          },
+        );
+
+    const normalizedSupplier = normalizeSupplierRecord(res.supplier);
+    setSuppliers((prev) => {
+      const exists = prev.some((s) => s.id === normalizedSupplier.id);
+      const next = exists
+        ? prev.map((s) => (s.id === normalizedSupplier.id ? normalizedSupplier : s))
+        : [...prev, normalizedSupplier];
+      return next.sort((a, b) => a.name.localeCompare(b.name));
+    });
+
+    if (res.syncedItemsCount && res.syncedItemsCount > 0) {
+      await loadInventory();
+    } else {
+      const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+      if (cached) {
+        const prevList = cached.suppliers ?? [];
+        const exists = prevList.some((s) => s.id === normalizedSupplier.id);
+        const nextList = exists
+          ? prevList.map((s) => (s.id === normalizedSupplier.id ? normalizedSupplier : s))
+          : [...prevList, normalizedSupplier];
+        await saveOfflineSnapshot('bootstrap', {
+          ...cached,
+          suppliers: nextList,
+        });
+      }
+    }
+
+    notify(
+      res.syncedItemsCount && res.syncedItemsCount > 0
+        ? `Saved supplier "${normalizedSupplier.name}" and synced ${res.syncedItemsCount} item(s).`
+        : `Saved supplier "${normalizedSupplier.name}".`,
+      'success',
+    );
+    return normalizedSupplier;
+  };
+
+  const deleteSupplier = async (id: string): Promise<void> => {
+    const target = suppliers.find((s) => s.id === id);
+    await apiRequest<{ ok: boolean; id: string }>(`/api/suppliers/${id}`, {
+      method: 'DELETE',
+    });
+    const nextSuppliers = suppliers.filter((s) => s.id !== id);
+    setSuppliers(nextSuppliers);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        suppliers: nextSuppliers,
+      });
+    }
+    notify(
+      target ? `Removed supplier "${target.name}" from directory.` : 'Supplier removed.',
+      'info',
+    );
+  };
+
+  const recordSupplierOrder = async (
+    payload: RecordSupplierOrderPayload,
+  ): Promise<StockMovement[]> => {
+    const res = await apiRequest<{
+      reference: string;
+      supplierName: string;
+      movements: StockMovement[];
+      items: InventoryItem[];
+    }>('/api/suppliers/record-order', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    const normalizedMovements = (res.movements || []).map((m) => normalizeStockMovement(m));
+    const updatedItemMap = new Map(
+      (res.items || []).map((item) => {
+        const norm = normalizeInventoryItem(item);
+        return [norm.id, norm];
+      }),
+    );
+
+    const nextItems = inventory.map((item) => updatedItemMap.get(item.id) ?? item);
+    const nextMovements = [...normalizedMovements, ...stockMovements];
+    setInventory(nextItems);
+    setStockMovements(nextMovements);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        inventory: nextItems,
+        stockMovements: nextMovements,
+      });
+    }
+
+    notify(
+      `Logged PO ${res.reference} (${normalizedMovements.length} item(s)) from ${res.supplierName}.`,
+      'success',
+    );
+    return normalizedMovements;
+  };
+
   const deleteInventoryItem = async (id: string): Promise<void> => {
     const target = inventory.find((item) => item.id === id);
     await apiRequest<{ ok: boolean; id: string }>(`/api/inventory/${id}`, {
@@ -1089,12 +1284,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify,
   ]);
 
+  const activeCriticalSystemAlerts = useMemo(
+    () => criticalAlertEvents.filter((e) => e.systemAlertStatus === 'active'),
+    [criticalAlertEvents],
+  );
+
   const unreadNotificationCount = useMemo(
     () =>
       alertSnapshot.notifications.filter(
         (n) => !acknowledgedAlertSignatures.includes(n.signature),
-      ).length,
-    [alertSnapshot.notifications, acknowledgedAlertSignatures],
+      ).length + activeCriticalSystemAlerts.length,
+    [alertSnapshot.notifications, acknowledgedAlertSignatures, activeCriticalSystemAlerts.length],
   );
 
   const markNotificationRead = useCallback((signature: string) => {
@@ -1133,6 +1333,105 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const closeReorderRequestModal = useCallback(() => {
     setReorderModalOpen(false);
   }, []);
+
+  const openAlertSettingsModal = useCallback(() => {
+    setAlertSettingsModalOpen(true);
+  }, []);
+
+  const closeAlertSettingsModal = useCallback(() => {
+    setAlertSettingsModalOpen(false);
+  }, []);
+
+  const refreshCriticalAlerts = useCallback(async () => {
+    if (!session || !isOnline) return;
+    try {
+      const res = await apiRequest<{
+        events: CriticalAlertEvent[];
+        smtpConfigured: boolean;
+      }>('/api/alerts/critical-events');
+      setCriticalAlertEvents(res.events || []);
+      setCriticalAlertSmtpConfigured(Boolean(res.smtpConfigured));
+    } catch {
+      // Ignore transient poll errors
+    }
+  }, [session, isOnline]);
+
+  useEffect(() => {
+    if (!session || !isOnline) return;
+    const timer = window.setInterval(() => {
+      void refreshCriticalAlerts();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [session, isOnline, refreshCriticalAlerts]);
+
+  const saveCriticalAlertConfig = useCallback(
+    async (next: CriticalAlertScheduleConfig): Promise<CriticalAlertScheduleConfig> => {
+      const res = await apiRequest<{
+        config: CriticalAlertScheduleConfig;
+        smtpConfigured: boolean;
+      }>('/api/alerts/critical-config', {
+        method: 'PUT',
+        body: JSON.stringify(next),
+      });
+      const normalized = normalizeCriticalAlertConfig(res.config);
+      setCriticalAlertConfig(normalized);
+      setCriticalAlertSmtpConfigured(Boolean(res.smtpConfigured));
+      notify('Off-hours & weekend alert schedule saved.', 'success');
+      return normalized;
+    },
+    [notify],
+  );
+
+  const triggerCriticalAlertTest = useCallback(
+    async (simulateOffHours = true) => {
+      const res = await apiRequest<{
+        triggeredEvents: CriticalAlertEvent[];
+        skippedReason?: string;
+        events: CriticalAlertEvent[];
+        smtpConfigured: boolean;
+      }>('/api/alerts/critical-events/test', {
+        method: 'POST',
+        body: JSON.stringify({ simulateOffHours }),
+      });
+      setCriticalAlertEvents(res.events || []);
+      setCriticalAlertSmtpConfigured(Boolean(res.smtpConfigured));
+      if (res.triggeredEvents.length > 0) {
+        notify(
+          `Dispatched ${res.triggeredEvents.length} critical stock alert(s).`,
+          'info',
+        );
+      } else if (res.skippedReason) {
+        notify(res.skippedReason, 'info');
+      }
+      return {
+        triggeredEvents: res.triggeredEvents || [],
+        skippedReason: res.skippedReason,
+      };
+    },
+    [notify],
+  );
+
+  const acknowledgeCriticalAlert = useCallback(
+    async (eventId: string) => {
+      const res = await apiRequest<{ event: CriticalAlertEvent }>(
+        `/api/alerts/critical-events/${eventId}/acknowledge`,
+        { method: 'POST' },
+      );
+      setCriticalAlertEvents((prev) =>
+        prev.map((e) => (e.id === eventId ? res.event : e)),
+      );
+    },
+    [],
+  );
+
+  const acknowledgeAllCriticalAlerts = useCallback(async () => {
+    const res = await apiRequest<{ events: CriticalAlertEvent[] }>(
+      '/api/alerts/critical-events/acknowledge-all',
+      { method: 'POST' },
+    );
+    setCriticalAlertEvents(res.events || []);
+    notify('All off-hours critical system alerts acknowledged.', 'success');
+  }, [notify]);
 
   const inventoryState = useMemo<InventoryStateSlice>(
     () => ({
@@ -1181,6 +1480,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     supplyCategories,
     services,
     inventory,
+    suppliers,
     inventoryState,
     stockMovements,
     customers,
@@ -1205,6 +1505,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     reorderModalScope,
     openReorderRequestModal,
     closeReorderRequestModal,
+    criticalAlertConfig,
+    criticalAlertEvents,
+    activeCriticalSystemAlerts,
+    criticalAlertSmtpConfigured,
+    alertSettingsModalOpen,
+    openAlertSettingsModal,
+    closeAlertSettingsModal,
+    refreshCriticalAlerts,
+    saveCriticalAlertConfig,
+    triggerCriticalAlertTest,
+    acknowledgeCriticalAlert,
+    acknowledgeAllCriticalAlerts,
     refreshAuthStatus,
     setupAdmin,
     loginWithPassword,
@@ -1232,6 +1544,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createInventoryItem,
     updateInventoryItem,
     bulkUpdateInventoryItems,
+    importSupplierMappings,
+    saveSupplier,
+    deleteSupplier,
+    recordSupplierOrder,
     deleteInventoryItem,
     trackStockChange,
     adjustInventory,

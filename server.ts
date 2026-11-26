@@ -5,10 +5,25 @@ import http from 'http';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initDatabase } from './src/server/db.ts';
+import { evaluateAndDispatchCriticalAlerts } from './src/server/criticalAlertService.ts';
 import { apiRouter } from './src/server/routes.ts';
 
 async function startServer() {
   initDatabase();
+
+  // Periodic background monitor for weekend/off-hours critical stock breaches
+  setTimeout(() => {
+    void evaluateAndDispatchCriticalAlerts().catch((err) => {
+      console.error('Initial critical alert monitor check failed:', err);
+    });
+  }, 3000).unref();
+
+  const alertMonitorInterval = setInterval(() => {
+    void evaluateAndDispatchCriticalAlerts().catch((err) => {
+      console.error('Critical alert monitor check failed:', err);
+    });
+  }, 60_000);
+  alertMonitorInterval.unref();
 
   const app = express();
   const httpServer = http.createServer(app);
