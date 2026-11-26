@@ -26,6 +26,8 @@ import type {
   StockAdjustmentPayload,
   StockMovement,
   SupplierCsvImportPayload,
+  SupplierDocument,
+  SupplierDocumentUploadPayload,
   SupplierRecord,
   SupplierSavePayload,
   SupplyCategory,
@@ -91,6 +93,7 @@ interface BootstrapPayload {
   services: PrintService[];
   inventory: InventoryItem[];
   suppliers?: SupplierRecord[];
+  supplierDocuments?: SupplierDocument[];
   stockMovements: StockMovement[];
   customers: Customer[];
   transactions: Transaction[];
@@ -137,6 +140,7 @@ interface AppContextValue {
   services: PrintService[];
   inventory: InventoryItem[];
   suppliers: SupplierRecord[];
+  supplierDocuments: SupplierDocument[];
   inventoryState: InventoryStateSlice;
   stockMovements: StockMovement[];
   customers: Customer[];
@@ -228,6 +232,8 @@ interface AppContextValue {
   importSupplierMappings: (payload: SupplierCsvImportPayload) => Promise<InventoryItem[]>;
   saveSupplier: (payload: SupplierSavePayload) => Promise<SupplierRecord>;
   deleteSupplier: (id: string) => Promise<void>;
+  uploadSupplierDocument: (payload: SupplierDocumentUploadPayload) => Promise<SupplierDocument>;
+  deleteSupplierDocument: (id: string) => Promise<void>;
   recordSupplierOrder: (payload: RecordSupplierOrderPayload) => Promise<StockMovement[]>;
   deleteInventoryItem: (id: string) => Promise<void>;
   trackStockChange: (id: string, payload: StockAdjustmentPayload) => Promise<StockMovement>;
@@ -289,6 +295,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [services, setServices] = useState<PrintService[]>([]);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
+  const [supplierDocuments, setSupplierDocuments] = useState<SupplierDocument[]>([]);
   const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [inventoryError, setInventoryError] = useState<string | null>(null);
@@ -356,6 +363,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setSuppliers(
         (data.suppliers || []).map((sup) => normalizeSupplierRecord(sup)),
       );
+      setSupplierDocuments(data.supplierDocuments || []);
       setStockMovements(
         (data.stockMovements || []).map((mov) => normalizeStockMovement(mov)),
       );
@@ -892,6 +900,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return next.sort((a, b) => a.name.localeCompare(b.name));
     });
 
+    if (
+      payload.id &&
+      payload.previousName &&
+      payload.previousName.trim().toLowerCase() !== normalizedSupplier.name.toLowerCase()
+    ) {
+      const prevLower = payload.previousName.trim().toLowerCase();
+      setSupplierDocuments((prev) =>
+        prev.map((doc) =>
+          doc.supplierId === normalizedSupplier.id ||
+          doc.supplierName.trim().toLowerCase() === prevLower
+            ? {
+                ...doc,
+                supplierId: normalizedSupplier.id,
+                supplierName: normalizedSupplier.name,
+              }
+            : doc,
+        ),
+      );
+    }
+
     if (res.syncedItemsCount && res.syncedItemsCount > 0) {
       await loadInventory();
     } else {
@@ -935,6 +963,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     notify(
       target ? `Removed supplier "${target.name}" from directory.` : 'Supplier removed.',
+      'info',
+    );
+  };
+
+  const uploadSupplierDocument = async (
+    payload: SupplierDocumentUploadPayload,
+  ): Promise<SupplierDocument> => {
+    const res = await apiRequest<{ document: SupplierDocument }>(
+      '/api/suppliers/documents',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+    const nextDocs = [res.document, ...supplierDocuments];
+    setSupplierDocuments(nextDocs);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        supplierDocuments: nextDocs,
+      });
+    }
+    notify(`Attached "${res.document.title}" to ${res.document.supplierName}.`, 'success');
+    return res.document;
+  };
+
+  const deleteSupplierDocument = async (id: string): Promise<void> => {
+    const target = supplierDocuments.find((d) => d.id === id);
+    await apiRequest<{ ok: boolean; id: string }>(`/api/suppliers/documents/${id}`, {
+      method: 'DELETE',
+    });
+    const nextDocs = supplierDocuments.filter((d) => d.id !== id);
+    setSupplierDocuments(nextDocs);
+
+    const cached = await loadOfflineSnapshot<BootstrapPayload>('bootstrap');
+    if (cached) {
+      await saveOfflineSnapshot('bootstrap', {
+        ...cached,
+        supplierDocuments: nextDocs,
+      });
+    }
+    notify(
+      target ? `Removed document "${target.title}".` : 'Supplier document removed.',
       'info',
     );
   };
@@ -1481,6 +1554,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     services,
     inventory,
     suppliers,
+    supplierDocuments,
     inventoryState,
     stockMovements,
     customers,
@@ -1547,6 +1621,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     importSupplierMappings,
     saveSupplier,
     deleteSupplier,
+    uploadSupplierDocument,
+    deleteSupplierDocument,
     recordSupplierOrder,
     deleteInventoryItem,
     trackStockChange,

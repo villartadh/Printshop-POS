@@ -11,6 +11,7 @@ import {
   Mail,
   MapPin,
   Package,
+  Paperclip,
   Phone,
   Plus,
   Search,
@@ -44,35 +45,19 @@ import {
 import { Modal } from '../../components/ui/Overlays.tsx';
 import { SupplierAnalyticsDashboard } from '../../components/suppliers/SupplierAnalyticsDashboard.tsx';
 import { SupplierComparisonView } from '../../components/suppliers/SupplierComparisonView.tsx';
+import { SupplierDocumentsPanel } from '../../components/suppliers/SupplierDocumentsPanel.tsx';
+import {
+  SupplierFormModal,
+  type SupplierFormState,
+} from '../../components/suppliers/SupplierFormModal.tsx';
+import {
+  SupplierPurchaseOrderModal,
+  type PurchaseOrderLineDraft,
+} from '../../components/suppliers/SupplierPurchaseOrderModal.tsx';
 
 type SupplierFilterMode = 'all' | 'needs_reorder' | 'has_orders';
-type SupplierDetailTab = 'materials' | 'orders' | 'forecast';
+type SupplierDetailTab = 'materials' | 'orders' | 'forecast' | 'documents';
 type SupplierViewMode = 'overview' | 'compare';
-
-interface SupplierFormState {
-  id?: string;
-  previousName?: string;
-  name: string;
-  contactPerson: string;
-  phone: string;
-  email: string;
-  address: string;
-  defaultLeadTimeDays: string;
-  paymentTerms: string;
-  notes: string;
-  syncToLinkedItems: boolean;
-}
-
-interface PurchaseOrderLineDraft {
-  inventoryItemId: string;
-  name: string;
-  sku: string;
-  unit: string;
-  currentStock: number;
-  selected: boolean;
-  quantity: string;
-  unitCost: string;
-}
 
 const EMPTY_FORM: SupplierFormState = {
   name: '',
@@ -109,12 +94,15 @@ export const SuppliersModule: React.FC = () => {
     session,
     settings,
     suppliers,
+    supplierDocuments,
     inventory,
     stockMovements,
     transactions,
     services,
     saveSupplier,
     deleteSupplier,
+    uploadSupplierDocument,
+    deleteSupplierDocument,
     recordSupplierOrder,
     setActiveModule,
     notify,
@@ -176,8 +164,9 @@ export const SuppliersModule: React.FC = () => {
         inventory,
         stockMovements,
         forecasts,
+        supplierDocuments,
       }),
-    [suppliers, inventory, stockMovements, forecasts],
+    [suppliers, inventory, stockMovements, forecasts, supplierDocuments],
   );
 
   const filteredSuppliers = useMemo(() => {
@@ -199,7 +188,12 @@ export const SuppliersModule: React.FC = () => {
         sup.items.some(
           (i) => i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q),
         ) ||
-        sup.historicalOrders.some((o) => o.reference.toLowerCase().includes(q))
+        sup.historicalOrders.some((o) => o.reference.toLowerCase().includes(q)) ||
+        sup.documents.some(
+          (d) =>
+            d.title.toLowerCase().includes(q) ||
+            (d.referenceNumber || '').toLowerCase().includes(q),
+        )
       );
     });
   }, [directory, filterMode, search]);
@@ -1123,6 +1117,20 @@ export const SuppliersModule: React.FC = () => {
                   >
                     Procurement Forecast ({selectedSupplier.urgentForecastCount})
                   </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={detailTab === 'documents'}
+                    onClick={() => setDetailTab('documents')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
+                      detailTab === 'documents'
+                        ? 'bg-[var(--pos-surface)] text-[var(--pos-text)] shadow-xs border border-[var(--pos-border)]'
+                        : 'text-[var(--pos-text-muted)] hover:text-[var(--pos-text)]'
+                    }`}
+                  >
+                    <Paperclip className="w-3.5 h-3.5" />
+                    Contracts &amp; Invoices ({selectedSupplier.documents.length})
+                  </button>
                 </div>
 
                 {detailTab === 'forecast' &&
@@ -1476,6 +1484,17 @@ export const SuppliersModule: React.FC = () => {
                   )}
                 </Card>
               )}
+
+              {/* Tab 4: Digital Invoices & Supplier Contracts */}
+              {detailTab === 'documents' && (
+                <SupplierDocumentsPanel
+                  supplier={selectedSupplier}
+                  canManage={canManageSuppliers}
+                  onUploadDocument={uploadSupplierDocument}
+                  onDeleteDocument={deleteSupplierDocument}
+                  onNotify={notify}
+                />
+              )}
             </>
           )}
         </div>
@@ -1483,309 +1502,38 @@ export const SuppliersModule: React.FC = () => {
         </>
       )}
 
-      {/* Add / Edit Supplier Modal */}
-      <Modal
+      <SupplierFormModal
         open={formOpen}
-        onClose={() => {
-          if (!savingSupplier) setFormOpen(false);
-        }}
-        title={formState.id ? `Edit Supplier · ${formState.previousName}` : 'Add Supplier Profile'}
-        subtitle="Maintain contact details, delivery lead times, and payment terms for procurement planning"
-        maxWidth="md"
-      >
-        <form onSubmit={handleSaveSupplierForm} className="space-y-3.5">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label="Supplier Name *"
-              placeholder="e.g. PaperOne Supply"
-              value={formState.name}
-              onChange={(e) => setFormState((prev) => ({ ...prev, name: e.target.value }))}
-              required
-            />
-            <Input
-              label="Contact Person"
-              placeholder="e.g. Ana Mendoza"
-              value={formState.contactPerson}
-              onChange={(e) =>
-                setFormState((prev) => ({ ...prev, contactPerson: e.target.value }))
-              }
-            />
-          </div>
+        saving={savingSupplier}
+        formState={formState}
+        onChange={setFormState}
+        onClose={() => setFormOpen(false)}
+        onSubmit={handleSaveSupplierForm}
+      />
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label="Phone Number"
-              placeholder="e.g. +63 2 8810 2200"
-              value={formState.phone}
-              onChange={(e) => setFormState((prev) => ({ ...prev, phone: e.target.value }))}
-            />
-            <Input
-              label="Email Address"
-              type="email"
-              placeholder="e.g. orders@vendor.local"
-              value={formState.email}
-              onChange={(e) => setFormState((prev) => ({ ...prev, email: e.target.value }))}
-            />
-          </div>
-
-          <Input
-            label="Warehouse / Office Address"
-            placeholder="Street, city, dispatch hub"
-            value={formState.address}
-            onChange={(e) => setFormState((prev) => ({ ...prev, address: e.target.value }))}
-          />
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label="Default Lead Time (days)"
-              type="number"
-              min="0"
-              max="365"
-              className="font-mono-num"
-              value={formState.defaultLeadTimeDays}
-              onChange={(e) =>
-                setFormState((prev) => ({ ...prev, defaultLeadTimeDays: e.target.value }))
-              }
-            />
-            <Input
-              label="Payment Terms"
-              placeholder="e.g. Net 15, Net 30, COD"
-              value={formState.paymentTerms}
-              onChange={(e) =>
-                setFormState((prev) => ({ ...prev, paymentTerms: e.target.value }))
-              }
-            />
-          </div>
-
-          <Input
-            label="Procurement Notes"
-            placeholder="Cut-off times, minimum order values, delivery terms..."
-            value={formState.notes}
-            onChange={(e) => setFormState((prev) => ({ ...prev, notes: e.target.value }))}
-          />
-
-          <label className="flex items-center gap-2 text-xs text-[var(--pos-text)] p-2.5 rounded-lg border border-[var(--pos-border)] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={formState.syncToLinkedItems}
-              onChange={(e) =>
-                setFormState((prev) => ({ ...prev, syncToLinkedItems: e.target.checked }))
-              }
-              className="h-4 w-4 accent-[var(--pos-primary)]"
-            />
-            <span>
-              Sync supplier name, primary contact, and default lead time onto linked inventory SKUs
-            </span>
-          </label>
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button
-              variant="secondary"
-              type="button"
-              disabled={savingSupplier}
-              onClick={() => setFormOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" loading={savingSupplier}>
-              {formState.id ? 'Save Changes' : 'Save Supplier'}
-            </Button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* Log Purchase Order Modal */}
-      <Modal
+      <SupplierPurchaseOrderModal
         open={poModalOpen}
-        onClose={() => {
-          if (!submittingPo) setPoModalOpen(false);
-        }}
-        title={`Log Purchase Order · ${poSupplierName}`}
-        subtitle="Record received vendor deliveries to update stock levels, unit costs, and supplier PO history"
-        maxWidth="lg"
-      >
-        <form onSubmit={handleSubmitPo} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <Input
-              label="PO Reference # *"
-              className="font-mono-num"
-              value={poReference}
-              onChange={(e) => setPoReference(e.target.value)}
-              required
-            />
-            <Input
-              label="Order Placed Date"
-              type="date"
-              className="font-mono-num"
-              value={poOrderedDate}
-              onChange={(e) => setPoOrderedDate(e.target.value)}
-            />
-            <Input
-              label="Expected Delivery"
-              type="date"
-              className="font-mono-num"
-              value={poExpectedDate}
-              onChange={(e) => setPoExpectedDate(e.target.value)}
-            />
-            <Input
-              label="Received Date"
-              type="date"
-              className="font-mono-num"
-              value={poDate}
-              onChange={(e) => setPoDate(e.target.value)}
-            />
-          </div>
-
-          <Input
-            label="Notes / Invoice Ref"
-            placeholder="Optional delivery remarks or supplier invoice number"
-            value={poNote}
-            onChange={(e) => setPoNote(e.target.value)}
-          />
-
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-xs font-medium text-[var(--pos-text)]">
-              Order Line Items ({poTotalSummary.count} selected)
-            </div>
-            <label className="flex items-center gap-2 text-xs text-[var(--pos-text-muted)] cursor-pointer">
-              <input
-                type="checkbox"
-                checked={poShowAllItems}
-                onChange={(e) => setPoShowAllItems(e.target.checked)}
-                className="h-3.5 w-3.5 accent-[var(--pos-primary)]"
-              />
-              Show all inventory items
-            </label>
-          </div>
-
-          <div className="border border-[var(--pos-border)] rounded-lg overflow-hidden max-h-72 overflow-y-auto">
-            {visiblePoLines.length === 0 ? (
-              <div className="p-6 text-center text-xs text-[var(--pos-text-muted)]">
-                No inventory items linked to this supplier yet. Enable &ldquo;Show all inventory items&rdquo; above to select materials.
-              </div>
-            ) : (
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-[var(--pos-border)] text-[11px] uppercase tracking-wider text-[var(--pos-text-muted)] bg-[var(--pos-bg)]">
-                    <th className="py-2 px-3 w-8"></th>
-                    <th className="py-2 px-3 font-semibold">Material</th>
-                    <th className="py-2 px-3 font-semibold text-right">Stock</th>
-                    <th className="py-2 px-3 font-semibold text-right w-28">Order Qty</th>
-                    <th className="py-2 px-3 font-semibold text-right w-28">
-                      Unit Cost ({taxCurr.currencySymbol})
-                    </th>
-                    <th className="py-2 px-3 font-semibold text-right">Line Total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--pos-border)] text-xs">
-                  {visiblePoLines.map((line) => {
-                    const lineTotal =
-                      (Number(line.quantity) || 0) * (Number(line.unitCost) || 0);
-                    return (
-                      <tr
-                        key={line.inventoryItemId}
-                        className={line.selected ? 'bg-[var(--pos-primary)]/5' : ''}
-                      >
-                        <td className="py-2 px-3">
-                          <input
-                            type="checkbox"
-                            checked={line.selected}
-                            aria-label={`Include ${line.name}`}
-                            onChange={(e) =>
-                              setPoLines((prev) =>
-                                prev.map((row) =>
-                                  row.inventoryItemId === line.inventoryItemId
-                                    ? { ...row, selected: e.target.checked }
-                                    : row,
-                                ),
-                              )
-                            }
-                            className="h-4 w-4 accent-[var(--pos-primary)]"
-                          />
-                        </td>
-                        <td className="py-2 px-3">
-                          <div className="font-medium text-[var(--pos-text)]">{line.name}</div>
-                          <div className="text-[11px] text-[var(--pos-text-muted)] font-mono-num">
-                            {line.sku} · {line.unit}
-                          </div>
-                        </td>
-                        <td className="py-2 px-3 text-right font-mono-num text-[var(--pos-text-muted)]">
-                          {line.currentStock}
-                        </td>
-                        <td className="py-2 px-3">
-                          <input
-                            type="number"
-                            min="0.1"
-                            step="0.1"
-                            disabled={!line.selected}
-                            aria-label={`Quantity for ${line.name}`}
-                            value={line.quantity}
-                            onChange={(e) =>
-                              setPoLines((prev) =>
-                                prev.map((row) =>
-                                  row.inventoryItemId === line.inventoryItemId
-                                    ? { ...row, quantity: e.target.value }
-                                    : row,
-                                ),
-                              )
-                            }
-                            className="w-full px-2 py-1 text-right font-mono-num text-xs rounded border border-[var(--pos-border)] bg-[var(--pos-surface)] disabled:opacity-40"
-                          />
-                        </td>
-                        <td className="py-2 px-3">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            disabled={!line.selected}
-                            aria-label={`Unit cost for ${line.name}`}
-                            value={line.unitCost}
-                            onChange={(e) =>
-                              setPoLines((prev) =>
-                                prev.map((row) =>
-                                  row.inventoryItemId === line.inventoryItemId
-                                    ? { ...row, unitCost: e.target.value }
-                                    : row,
-                                ),
-                              )
-                            }
-                            className="w-full px-2 py-1 text-right font-mono-num text-xs rounded border border-[var(--pos-border)] bg-[var(--pos-surface)] disabled:opacity-40"
-                          />
-                        </td>
-                        <td className="py-2 px-3 text-right font-mono-num font-semibold text-[var(--pos-text)]">
-                          {line.selected ? formatCurrency(lineTotal, taxCurr) : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[var(--pos-border)]">
-            <div className="text-xs text-[var(--pos-text-muted)]">
-              PO Total:{' '}
-              <strong className="text-sm font-mono-num text-[var(--pos-text)]">
-                {formatCurrency(poTotalSummary.totalCost, taxCurr)}
-              </strong>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                type="button"
-                disabled={submittingPo}
-                onClick={() => setPoModalOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" loading={submittingPo}>
-                Receive PO &amp; Update Stock
-              </Button>
-            </div>
-          </div>
-        </form>
-      </Modal>
+        submitting={submittingPo}
+        supplierName={poSupplierName}
+        reference={poReference}
+        orderedDate={poOrderedDate}
+        expectedDate={poExpectedDate}
+        receivedDate={poDate}
+        note={poNote}
+        showAllItems={poShowAllItems}
+        visibleLines={visiblePoLines}
+        totalSummary={poTotalSummary}
+        taxCurrency={taxCurr}
+        onChangeReference={setPoReference}
+        onChangeOrderedDate={setPoOrderedDate}
+        onChangeExpectedDate={setPoExpectedDate}
+        onChangeReceivedDate={setPoDate}
+        onChangeNote={setPoNote}
+        onChangeShowAllItems={setPoShowAllItems}
+        onUpdateLines={setPoLines}
+        onClose={() => setPoModalOpen(false)}
+        onSubmit={handleSubmitPo}
+      />
 
       {/* Delete Supplier Confirmation Modal */}
       <Modal

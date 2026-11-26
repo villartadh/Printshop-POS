@@ -16,9 +16,16 @@ import {
 } from '../shared/defaults.ts';
 import { DEFAULT_CRITICAL_ALERT_CONFIG } from '../shared/criticalAlertSchedule.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+export const DATA_DIR = process.env.PRINTSHOP_DATA_DIR
+  ? path.resolve(process.env.PRINTSHOP_DATA_DIR)
+  : path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+export const SUPPLIER_DOCS_DIR = path.resolve(DATA_DIR, 'supplier-docs');
+if (!fs.existsSync(SUPPLIER_DOCS_DIR)) {
+  fs.mkdirSync(SUPPLIER_DOCS_DIR, { recursive: true });
 }
 
 const DB_PATH = path.join(DATA_DIR, 'printshop-pos.db');
@@ -26,6 +33,12 @@ export const db = new Database(DB_PATH);
 
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+
+export function closeDatabase() {
+  if (db.open) {
+    db.close();
+  }
+}
 
 export function initDatabase() {
   db.exec(`
@@ -301,6 +314,27 @@ export function initDatabase() {
       acknowledged_by TEXT NOT NULL DEFAULT '',
       acknowledged_at TEXT NOT NULL DEFAULT '',
       triggered_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS supplier_documents (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT NOT NULL DEFAULT '',
+      supplier_name TEXT NOT NULL,
+      supplier_key TEXT NOT NULL,
+      doc_type TEXT NOT NULL CHECK(doc_type IN ('invoice', 'contract', 'pricing_agreement', 'quote', 'other')),
+      title TEXT NOT NULL,
+      reference_number TEXT NOT NULL DEFAULT '',
+      effective_date TEXT NOT NULL DEFAULT '',
+      expiry_date TEXT NOT NULL DEFAULT '',
+      agreed_terms_summary TEXT NOT NULL DEFAULT '',
+      file_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      storage_key TEXT NOT NULL,
+      uploaded_by_id TEXT NOT NULL DEFAULT '',
+      uploaded_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
   `);
 

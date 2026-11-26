@@ -2,6 +2,7 @@ import type {
   InventoryItem,
   PredictiveReorderForecast,
   StockMovement,
+  SupplierDocument,
   SupplierRecord,
 } from '../types/inventory.ts';
 import {
@@ -76,6 +77,7 @@ export interface SupplierProfile {
   recommendedOrderSpend: number;
   earliestStockoutDays: number | null;
   leadTimeRiskCount: number;
+  documents: SupplierDocument[];
 }
 
 function normalizeSupplierKey(name: string): string {
@@ -124,11 +126,13 @@ export function buildSupplierDirectory({
   inventory,
   stockMovements,
   forecasts,
+  supplierDocuments = [],
 }: {
   suppliers: SupplierRecord[];
   inventory: InventoryItem[];
   stockMovements: StockMovement[];
   forecasts: PredictiveReorderForecast[];
+  supplierDocuments?: SupplierDocument[];
 }): SupplierProfile[] {
   const recordByKey = new Map<string, SupplierRecord>();
   const displayNameByKey = new Map<string, string>();
@@ -295,6 +299,15 @@ export function buildSupplierDirectory({
         lines: [line],
       });
     }
+  }
+
+  const docsByKey = new Map<string, SupplierDocument[]>();
+  for (const doc of supplierDocuments) {
+    const key = normalizeSupplierKey(doc.supplierName);
+    if (!key) continue;
+    const list = docsByKey.get(key) ?? [];
+    list.push(doc);
+    docsByKey.set(key, list);
   }
 
   const allKeys = Array.from(displayNameByKey.keys());
@@ -499,6 +512,9 @@ export function buildSupplierDirectory({
       recommendedOrderSpend,
       earliestStockoutDays,
       leadTimeRiskCount,
+      documents: [...(docsByKey.get(key) ?? [])].sort(
+        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
+      ),
     };
   });
 

@@ -73,3 +73,22 @@ export async function apiRequest<T>(
 
   return data as T;
 }
+
+export async function fetchAuthorizedBlob(path: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  if (memoryAccessToken) {
+    headers.Authorization = `Bearer ${memoryAccessToken}`;
+  }
+  const res = await fetch(path, { headers });
+  if (!res.ok) {
+    let message = `Failed to download file (${res.status})`;
+    try {
+      const json = (await res.json()) as { error?: string; message?: string };
+      message = json.error || json.message || message;
+    } catch {
+      // Ignore parse failure
+    }
+    throw new Error(message);
+  }
+  return res.blob();
+}

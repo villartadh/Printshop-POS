@@ -3,7 +3,7 @@ import { CheckCircle2, CreditCard, Plus, Trash2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import type { PaymentEntry, PaymentMethodConfig } from '../../shared/types.ts';
-import { Button, Input, Select } from '../../components/ui/Primitives.tsx';
+import { Button, Input } from '../../components/ui/Primitives.tsx';
 import { BottomSheet, Modal } from '../../components/ui/Overlays.tsx';
 
 interface CheckoutModalProps {

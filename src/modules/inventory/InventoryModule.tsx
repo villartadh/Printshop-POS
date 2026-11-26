@@ -18,7 +18,7 @@ import type {
   StockMovementType,
   StockStatus,
 } from '../../types/inventory.ts';
-import { Button, Card, Input, Select, StatusIndicator } from '../../components/ui/Primitives.tsx';
+import { Button, Card, Input, Select } from '../../components/ui/Primitives.tsx';
 import { DataTable } from '../../components/ui/DataTable.tsx';
 import { LoadingState, Modal } from '../../components/ui/Overlays.tsx';
 import {
@@ -29,6 +29,7 @@ import { InventoryLabelPrintModal } from '../../components/inventory/InventoryLa
 import { InventoryTable } from '../../components/inventory/InventoryTable.tsx';
 import { PredictiveReorderPanel } from '../../components/inventory/PredictiveReorderPanel.tsx';
 import { StockMovementModal } from '../../components/inventory/StockMovementModal.tsx';
+import { StockAdjustmentModal } from '../../components/inventory/StockAdjustmentModal.tsx';
 import { SupplierCsvImportModal } from '../../components/inventory/SupplierCsvImportModal.tsx';
 import { BarcodeReceivingScannerModal } from '../../components/inventory/BarcodeReceivingScannerModal.tsx';
 
@@ -782,79 +783,23 @@ export const InventoryModule: React.FC = () => {
         onNotify={notify}
       />
 
-      {/* Stock Adjustment Modal */}
-      <Modal
-        open={Boolean(adjustTarget)}
+      <StockAdjustmentModal
+        target={adjustTarget}
+        currencySymbol={taxCurr.currencySymbol}
+        movementType={movementType}
+        delta={delta}
+        unitCost={adjustUnitCost}
+        reference={reference}
+        note={note}
+        submitting={submitting}
+        onChangeMovementType={setMovementType}
+        onChangeDelta={setDelta}
+        onChangeUnitCost={setAdjustUnitCost}
+        onChangeReference={setReference}
+        onChangeNote={setNote}
         onClose={() => setAdjustTarget(null)}
-        title={adjustTarget ? `Adjust Stock · ${adjustTarget.name}` : ''}
-        subtitle={
-          adjustTarget
-            ? `On hand: ${adjustTarget.quantityOnHand} ${adjustTarget.unit} · Reorder level: ${adjustTarget.reorderLevel} ${adjustTarget.unit}`
-            : ''
-        }
-        maxWidth="sm"
-      >
-        <form onSubmit={handleAdjust} className="space-y-3.5">
-          <Select
-            label="Movement Type"
-            value={movementType}
-            onChange={(e) => setMovementType(e.target.value as StockMovementType)}
-            options={[
-              { value: 'purchase', label: 'Purchase / Restock (+)' },
-              { value: 'job_usage', label: 'Print Job Usage (-)' },
-              { value: 'adjustment', label: 'Manual Adjustment (+/-)' },
-              { value: 'wastage', label: 'Production Wastage (-)' },
-              { value: 'damaged', label: 'Damaged Stock (-)' },
-              { value: 'return', label: 'Supplier / Customer Return (+)' },
-            ]}
-          />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label={`Quantity (${adjustTarget?.unit || 'units'})`}
-              type="number"
-              step="0.1"
-              className="font-mono-num"
-              value={delta}
-              onChange={(e) => setDelta(e.target.value)}
-              required
-            />
-            <Input
-              label={`Unit Cost (${taxCurr.currencySymbol})`}
-              type="number"
-              min="0"
-              step="0.01"
-              className="font-mono-num"
-              value={adjustUnitCost}
-              onChange={(e) => setAdjustUnitCost(e.target.value)}
-            />
-          </div>
-          <Input
-            label="Reference # (PO / Job / Receipt)"
-            placeholder="e.g. PO-2026-042 or JO-261124-102"
-            value={reference}
-            onChange={(e) => setReference(e.target.value)}
-          />
-          <Input
-            label="Reason / Notes"
-            placeholder="e.g. Monthly delivery or misprint wastage"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-          <div className="flex justify-end gap-2 pt-2">
-            <Button
-              variant="secondary"
-              type="button"
-              disabled={submitting}
-              onClick={() => setAdjustTarget(null)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" loading={submitting}>
-              Apply Stock Update
-            </Button>
-          </div>
-        </form>
-      </Modal>
+        onSubmit={handleAdjust}
+      />
 
       {/* Delete Confirmation Dialog */}
       <Modal

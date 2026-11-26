@@ -31,10 +31,11 @@ import type {
   Transaction,
 } from '../../shared/types.ts';
 import { Button, Input, QuantityStepper, Select } from '../../components/ui/Primitives.tsx';
-import { BottomSheet, EmptyState, Modal } from '../../components/ui/Overlays.tsx';
+import { BottomSheet, EmptyState } from '../../components/ui/Overlays.tsx';
 import { ServiceIcon } from '../../components/ui/ServiceIcon.tsx';
 import { ServiceConfigurator } from './ServiceConfigurator.tsx';
 import { CheckoutModal } from './CheckoutModal.tsx';
+import { PosQuickModals } from '../../components/pos/PosQuickModals.tsx';
 import { ReceiptModal } from '../receipts/ReceiptModal.tsx';
 
 interface PosModuleProps {
@@ -866,190 +867,47 @@ export const PosModule: React.FC<PosModuleProps> = ({ layoutTier }) => {
         onCompletePayment={handleCompletePayment}
       />
 
-      {/* Custom Service Item Modal */}
-      <Modal
-        open={customItemOpen}
-        onClose={() => setCustomItemOpen(false)}
-        title="Add Custom Service"
-        subtitle="One-off print job or manual line item"
-        maxWidth="sm"
-      >
-        <form onSubmit={handleAddCustomItem} className="space-y-3.5">
-          <Input
-            label="Service / Item Description"
-            placeholder="e.g. Custom Die-Cut Vinyl Sticker"
-            value={customName}
-            onChange={(e) => setCustomName(e.target.value)}
-            required
-          />
-          <div className="grid grid-cols-2 gap-3">
-            <Input
-              label={`Unit Price (${taxCurr.currencySymbol})`}
-              type="number"
-              min="1"
-              step="0.01"
-              value={customPrice}
-              onChange={(e) => setCustomPrice(e.target.value)}
-              required
-            />
-            <Input
-              label="Quantity"
-              type="number"
-              min="1"
-              value={customQty}
-              onChange={(e) => setCustomQty(e.target.value)}
-              required
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" type="button" onClick={() => setCustomItemOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit">Add to Order</Button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* Order Discount Modal */}
-      <Modal
-        open={discountModalOpen}
-        onClose={() => setDiscountModalOpen(false)}
-        title="Order Discount"
-        maxWidth="sm"
-        footer={
-          <Button size="sm" onClick={() => setDiscountModalOpen(false)}>
-            Apply
-          </Button>
-        }
-      >
-        <div className="space-y-3">
-          <Select
-            label="Discount Type"
-            value={orderDiscountType}
-            onChange={(e) => setOrderDiscountType(e.target.value as typeof orderDiscountType)}
-            options={[
-              { value: 'none', label: 'No Discount' },
-              { value: 'percent', label: 'Percentage (%)' },
-              { value: 'fixed', label: `Fixed Amount (${taxCurr.currencySymbol})` },
-            ]}
-          />
-          {orderDiscountType !== 'none' && (
-            <Input
-              label={orderDiscountType === 'percent' ? 'Discount (%)' : 'Discount Amount'}
-              type="number"
-              min="0"
-              step="0.01"
-              value={orderDiscountValue}
-              onChange={(e) => setOrderDiscountValue(Math.max(0, Number(e.target.value) || 0))}
-            />
-          )}
-        </div>
-      </Modal>
-
-      {/* Recall Held Orders */}
-      <Modal
-        open={recallModalOpen}
-        onClose={() => setRecallModalOpen(false)}
-        title="Recall Held Orders"
-        maxWidth="md"
-      >
-        {heldOrders.length === 0 ? (
-          <EmptyState
-            title="No held orders"
-            description="Orders put on hold during checkout will appear here."
-          />
-        ) : (
-          <div className="space-y-2.5">
-            {heldOrders.map((h) => (
-              <div
-                key={h.id}
-                className="p-3 rounded-lg border border-[var(--pos-border)] flex items-center justify-between gap-3"
-              >
-                <div>
-                  <div className="text-sm font-semibold text-[var(--pos-text)]">
-                    {h.receiptNumber} · {h.customerName}
-                  </div>
-                  <div className="text-xs text-[var(--pos-text-muted)]">
-                    {h.items.length} item(s) · {formatCurrency(h.totalAmount, taxCurr)}
-                  </div>
-                </div>
-                <Button size="sm" onClick={() => void handleRecallOrder(h)}>
-                  Recall
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </Modal>
-
-      {/* Quick Add Customer */}
-      <Modal
-        open={quickCustomerOpen}
-        onClose={() => setQuickCustomerOpen(false)}
-        title="Quick Add Customer"
-        maxWidth="sm"
-      >
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!newCustName.trim()) return;
-            const created = await createCustomer({ name: newCustName, phone: newCustPhone });
-            setSelectedCustomerId(created.id);
-            setNewCustName('');
-            setNewCustPhone('');
-            setQuickCustomerOpen(false);
-          }}
-          className="space-y-3"
-        >
-          <Input
-            label="Customer Name"
-            value={newCustName}
-            onChange={(e) => setNewCustName(e.target.value)}
-            required
-          />
-          <Input
-            label="Phone Number"
-            value={newCustPhone}
-            onChange={(e) => setNewCustPhone(e.target.value)}
-          />
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" type="button" onClick={() => setQuickCustomerOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit">Save & Select</Button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* Barcode / SKU Scanner Lookup */}
-      <Modal
-        open={scannerOpen}
-        onClose={() => setScannerOpen(false)}
-        title="SKU & Barcode Lookup"
-        subtitle="Scan with a USB/Bluetooth barcode wedge or enter SKU manually"
-        maxWidth="sm"
-      >
-        <div className="space-y-3">
-          <Input
-            label="Barcode / SKU"
-            placeholder="e.g. PRT-BW-01"
-            autoFocus
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                handleSearchKeyDown(e);
-                setScannerOpen(false);
-              }
-            }}
-          />
-          <p className="text-xs text-[var(--pos-text-muted)]">
-            {typeof window !== 'undefined' && 'BarcodeDetector' in window
-              ? 'Native BarcodeDetector API is available on this device.'
-              : 'Hardware keyboard-wedge scanners work directly in the search field; press Enter after scanning.'}
-          </p>
-        </div>
-      </Modal>
+      <PosQuickModals
+        taxCurrency={taxCurr}
+        customItemOpen={customItemOpen}
+        onCloseCustomItem={() => setCustomItemOpen(false)}
+        customName={customName}
+        onChangeCustomName={setCustomName}
+        customPrice={customPrice}
+        onChangeCustomPrice={setCustomPrice}
+        customQty={customQty}
+        onChangeCustomQty={setCustomQty}
+        onSubmitCustomItem={handleAddCustomItem}
+        discountModalOpen={discountModalOpen}
+        onCloseDiscountModal={() => setDiscountModalOpen(false)}
+        orderDiscountType={orderDiscountType}
+        onChangeOrderDiscountType={setOrderDiscountType}
+        orderDiscountValue={orderDiscountValue}
+        onChangeOrderDiscountValue={setOrderDiscountValue}
+        recallModalOpen={recallModalOpen}
+        onCloseRecallModal={() => setRecallModalOpen(false)}
+        heldOrders={heldOrders}
+        onRecallOrder={handleRecallOrder}
+        quickCustomerOpen={quickCustomerOpen}
+        onCloseQuickCustomer={() => setQuickCustomerOpen(false)}
+        newCustName={newCustName}
+        onChangeNewCustName={setNewCustName}
+        newCustPhone={newCustPhone}
+        onChangeNewCustPhone={setNewCustPhone}
+        onSubmitQuickCustomer={async () => {
+          if (!newCustName.trim()) return;
+          const created = await createCustomer({ name: newCustName, phone: newCustPhone });
+          setSelectedCustomerId(created.id);
+          setNewCustName('');
+          setNewCustPhone('');
+          setQuickCustomerOpen(false);
+        }}
+        scannerOpen={scannerOpen}
+        onCloseScanner={() => setScannerOpen(false)}
+        searchQuery={searchQuery}
+        onChangeSearchQuery={setSearchQuery}
+        onScannerKeyDown={handleSearchKeyDown}
+      />
 
       {/* Receipt Preview */}
       <ReceiptModal

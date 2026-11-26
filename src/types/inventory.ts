@@ -315,6 +315,45 @@ export interface RecordSupplierOrderPayload {
   }>;
 }
 
+export type SupplierDocumentType =
+  | 'invoice'
+  | 'contract'
+  | 'pricing_agreement'
+  | 'quote'
+  | 'other';
+
+export interface SupplierDocument {
+  id: string;
+  supplierId?: string;
+  supplierName: string;
+  docType: SupplierDocumentType;
+  title: string;
+  referenceNumber?: string;
+  effectiveDate?: string;
+  expiryDate?: string;
+  agreedTermsSummary?: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  uploadedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupplierDocumentUploadPayload {
+  supplierId?: string;
+  supplierName: string;
+  docType: SupplierDocumentType;
+  title: string;
+  referenceNumber?: string;
+  effectiveDate?: string;
+  expiryDate?: string;
+  agreedTermsSummary?: string;
+  fileName: string;
+  mimeType: string;
+  dataBase64: string;
+}
+
 export type OffHoursAlertChannel = 'system' | 'email' | 'both';
 export type CriticalThresholdTriggerMode = 'below_minimum' | 'at_or_below_minimum';
 export type CriticalAlertTriggerReason = 'weekend' | 'off_hours' | 'manual_test';

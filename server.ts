@@ -4,9 +4,9 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import { initDatabase } from './src/server/db.ts';
+import { createApiApp } from './src/server/app.ts';
 import { evaluateAndDispatchCriticalAlerts } from './src/server/criticalAlertService.ts';
-import { apiRouter } from './src/server/routes.ts';
+import { initDatabase } from './src/server/db.ts';
 
 async function startServer() {
   initDatabase();
@@ -25,15 +25,8 @@ async function startServer() {
   }, 60_000);
   alertMonitorInterval.unref();
 
-  const app = express();
+  const app = createApiApp();
   const httpServer = http.createServer(app);
-  app.use(express.json({ limit: '5mb' }));
-
-  app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
-  });
-
-  app.use('/api', apiRouter);
 
   const isProd = process.env.NODE_ENV === 'production';
   const distPath = path.resolve(process.cwd(), 'dist');
