@@ -1,6 +1,15 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_SUPPLY_CATEGORIES,
+  DEMO_CATEGORIES,
+  DEMO_INVENTORY,
+  DEMO_SERVICES,
+  DEMO_STOCK_MOVEMENTS,
+  DEMO_SUPPLIERS,
+} from '../shared/defaults.ts';
 
 function createJsonResponse(body: unknown, status = 200): Response {
   const payload = JSON.stringify(body);
@@ -27,6 +36,29 @@ export function createDefaultApiFetchMock() {
 
     if (pathname.endsWith('/api/health')) {
       return createJsonResponse({ status: 'ok', time: new Date().toISOString() });
+    }
+    if (pathname.endsWith('/api/auth/status')) {
+      return createJsonResponse({ needsSetup: false, quickUsers: [] });
+    }
+    if (pathname.endsWith('/api/bootstrap')) {
+      return createJsonResponse({
+        settings: DEFAULT_SETTINGS,
+        categories: DEMO_CATEGORIES,
+        supplyCategories: DEFAULT_SUPPLY_CATEGORIES,
+        services: DEMO_SERVICES,
+        inventory: DEMO_INVENTORY,
+        suppliers: DEMO_SUPPLIERS,
+        supplierDocuments: [],
+        stockMovements: DEMO_STOCK_MOVEMENTS,
+        customers: [],
+        transactions: [],
+        printJobs: [],
+        expenses: [],
+        shifts: [],
+        users: [],
+        auditLogs: [],
+        serverTime: new Date().toISOString(),
+      });
     }
     if (pathname.endsWith('/api/inventory')) {
       return createJsonResponse({
@@ -56,6 +88,150 @@ export function createDefaultApiFetchMock() {
     return createJsonResponse({ ok: true });
   });
 }
+
+// Lightweight in-memory IndexedDB mock for offlineDb.ts in JSDOM
+function createMockIndexedDB() {
+  const databases = new Map<string, Map<string, Map<IDBValidKey, unknown>>>();
+
+  const getStoreMap = (dbName: string, storeName: string) => {
+    let dbStores = databases.get(dbName);
+    if (!dbStores) {
+      dbStores = new Map();
+      databases.set(dbName, dbStores);
+    }
+    let store = dbStores.get(storeName);
+    if (!store) {
+      store = new Map();
+      dbStores.set(storeName, store);
+    }
+    return store;
+  };
+
+  const makeRequest = <T>(executor: () => T) => {
+    const req: {
+      result: T | undefined;
+      error: DOMException | null;
+      onsuccess: ((ev: Event) => void) | null;
+      onerror: ((ev: Event) => void) | null;
+    } = {
+      result: undefined,
+      error: null,
+      onsuccess: null,
+      onerror: null,
+    };
+
+    queueMicrotask(() => {
+      try {
+        req.result = executor();
+        req.onsuccess?.({ target: req } as unknown as Event);
+      } catch (err) {
+        req.error = err as DOMException;
+        req.onerror?.({ target: req } as unknown as Event);
+      }
+    });
+
+    return req;
+  };
+
+  const open = (name: string) => {
+    if (!databases.has(name)) {
+      databases.set(name, new Map());
+    }
+    const dbStores = databases.get(name)!;
+
+    const dbHandle = {
+      name,
+      objectStoreNames: {
+        contains: (storeName: string) => dbStores.has(storeName),
+      },
+      createObjectStore: (storeName: string) => {
+        if (!dbStores.has(storeName)) {
+          dbStores.set(storeName, new Map());
+        }
+        return {};
+      },
+      transaction: (storeName: string) => {
+        const tx: {
+          error: DOMException | null;
+          oncomplete: ((ev: Event) => void) | null;
+          onerror: ((ev: Event) => void) | null;
+          objectStore: (name: string) => Record<string, unknown>;
+        } = {
+          error: null,
+          oncomplete: null,
+          onerror: null,
+          objectStore: (targetStore: string) => {
+            const store = getStoreMap(name, targetStore || storeName);
+            const scheduleComplete = () => {
+              queueMicrotask(() => {
+                tx.oncomplete?.({ target: tx } as unknown as Event);
+              });
+            };
+            return {
+              put: (value: unknown, key?: IDBValidKey) => {
+                const resolvedKey =
+                  key ??
+                  ((value && typeof value === 'object' && 'id' in value
+                    ? (value as { id: IDBValidKey }).id
+                    : undefined) as IDBValidKey) ??
+                  `k_${store.size + 1}`;
+                store.set(resolvedKey, value);
+                scheduleComplete();
+                return makeRequest(() => resolvedKey);
+              },
+              get: (key: IDBValidKey) => makeRequest(() => store.get(key)),
+              getAll: () => makeRequest(() => Array.from(store.values())),
+              delete: (key: IDBValidKey) => {
+                store.delete(key);
+                scheduleComplete();
+                return makeRequest(() => undefined);
+              },
+              clear: () => {
+                store.clear();
+                scheduleComplete();
+                return makeRequest(() => undefined);
+              },
+            };
+          },
+        };
+        return tx;
+      },
+      close: vi.fn(),
+    };
+
+    const openReq: {
+      result: typeof dbHandle;
+      error: DOMException | null;
+      onupgradeneeded: ((ev: IDBVersionChangeEvent) => void) | null;
+      onsuccess: ((ev: Event) => void) | null;
+      onerror: ((ev: Event) => void) | null;
+    } = {
+      result: dbHandle,
+      error: null,
+      onupgradeneeded: null,
+      onsuccess: null,
+      onerror: null,
+    };
+
+    queueMicrotask(() => {
+      openReq.onupgradeneeded?.({ target: openReq } as unknown as IDBVersionChangeEvent);
+      openReq.onsuccess?.({ target: openReq } as unknown as Event);
+    });
+
+    return openReq as unknown as IDBOpenDBRequest;
+  };
+
+  return {
+    open,
+    deleteDatabase: vi.fn((name: string) => {
+      databases.delete(name);
+      return makeRequest(() => undefined) as unknown as IDBOpenDBRequest;
+    }),
+    _resetAll: () => databases.clear(),
+  };
+}
+
+let mockIndexedDbInstance: ReturnType<typeof createMockIndexedDB> | null = null;
 
 if (typeof window !== 'undefined') {
   if (!window.matchMedia) {
@@ -142,6 +318,44 @@ if (typeof window !== 'undefined') {
     });
   }
 
+  // Ensure Web Crypto randomUUID & getRandomValues exist reliably in JSDOM
+  const existingCrypto = globalThis.crypto;
+  if (!existingCrypto || typeof existingCrypto.randomUUID !== 'function') {
+    let uuidSeq = 0;
+    const mockCrypto = {
+      ...(existingCrypto || {}),
+      getRandomValues:
+        existingCrypto?.getRandomValues?.bind(existingCrypto) ??
+        (<T extends ArrayBufferView>(arr: T): T => {
+          const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+          for (let i = 0; i < bytes.length; i += 1) {
+            bytes[i] = (i * 37 + 13) % 256;
+          }
+          return arr;
+        }),
+      randomUUID: () => {
+        uuidSeq += 1;
+        const suffix = String(uuidSeq).padStart(12, '0');
+        return `00000000-0000-4000-8000-${suffix}` as `${string}-${string}-${string}-${string}-${string}`;
+      },
+    };
+    Object.defineProperty(globalThis, 'crypto', {
+      writable: true,
+      configurable: true,
+      value: mockCrypto,
+    });
+  }
+
+  // Register deterministic in-memory IndexedDB mock when JSDOM lacks it
+  if (typeof globalThis.indexedDB === 'undefined') {
+    mockIndexedDbInstance = createMockIndexedDB();
+    Object.defineProperty(globalThis, 'indexedDB', {
+      writable: true,
+      configurable: true,
+      value: mockIndexedDbInstance,
+    });
+  }
+
   beforeEach(() => {
     vi.stubGlobal('fetch', createDefaultApiFetchMock());
   });
@@ -150,6 +364,9 @@ if (typeof window !== 'undefined') {
 afterEach(() => {
   cleanup();
   if (typeof window !== 'undefined') {
+    window.localStorage?.clear();
+    window.sessionStorage?.clear();
+    mockIndexedDbInstance?._resetAll();
     vi.unstubAllGlobals();
   }
 });

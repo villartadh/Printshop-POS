@@ -10,45 +10,11 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test-and-build:
-    name: Test & Build (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ['20', '22']
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Run Vitest suite
-        run: npm test
-
-      - name: Build production bundle
-        run: npm run build
-
-      - name: Run full-stack production E2E smoke test
-        run: npm run test:e2e
-
-  junit-and-artifacts:
-    name: Publish Test Report & Build Artifact
-    needs: test-and-build
+    name: Typecheck, Vitest, Build & E2E Smoke
     runs-on: ubuntu-latest
 
     steps:
@@ -59,13 +25,28 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
+
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-22-npm-${{ hashFiles('package-lock.json', 'package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-22-npm-
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
-      - name: Generate Vitest JUnit report
-        run: npx vitest run --reporter=default --reporter=junit --outputFile=test-results/vitest-junit.xml
+      - name: Run strict TypeScript check
+        run: npm run typecheck
+
+      - name: Run Vitest suite
+        run: npm test -- --reporter=default --reporter=junit --outputFile=test-results/vitest-junit.xml
 
       - name: Upload Vitest JUnit report
         if: always()
@@ -78,6 +59,15 @@ jobs:
 
       - name: Build production SPA & PWA bundle
         run: npm run build
+
+      - name: Verify production bundle & PWA outputs
+        run: |
+          test -f dist/index.html
+          test -f dist/manifest.webmanifest
+          test -f dist/sw.js
+
+      - name: Run full-stack production E2E smoke test
+        run: npm run test:e2e
 
       - name: Upload production build artifact
         uses: actions/upload-artifact@v4
