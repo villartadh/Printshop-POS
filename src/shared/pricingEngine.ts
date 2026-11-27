@@ -73,14 +73,26 @@ export function convertToFeet(value: number, unit: ServiceConfigSelection['dimen
     case 'cm':
       return value / 30.48;
     case 'm':
-      return value * 3.28084;
+      return value / 0.3048;
     default:
       return value;
   }
 }
 
 export function convertToMeters(value: number, unit: ServiceConfigSelection['dimensionUnit']): number {
-  return convertToFeet(value, unit) * 0.3048;
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  switch (unit) {
+    case 'm':
+      return value;
+    case 'cm':
+      return value / 100;
+    case 'ft':
+      return value * 0.3048;
+    case 'in':
+      return value * 0.0254;
+    default:
+      return value;
+  }
 }
 
 type FormulaToken =
@@ -481,4 +493,47 @@ export function calculateOrderTotals(
     taxAmount,
     totalAmount,
   };
+}
+
+export function recalculateCartItemQuantity(
+  item: CartItem,
+  nextQty: number,
+  service: PrintService | undefined,
+  taxCurrency: TaxAndCurrencyConfig,
+): CartItem {
+  const safeNextQty = Math.max(1, Math.round(safeFinite(nextQty, 1)));
+
+  if (!item.isCustomItem && service) {
+    const nextConfig: ServiceConfigSelection = service.allowPagesAndCopies
+      ? { ...item.config, copies: safeNextQty }
+      : { ...item.config, quantity: safeNextQty };
+    const calc = calculateServicePrice(service, nextConfig, taxCurrency);
+    const updatedBase: CartItem = {
+      ...item,
+      unitPrice: calc.unitPrice,
+      effectiveQuantity: calc.effectiveQuantity,
+      displaySummary: calc.displaySummary,
+      config: nextConfig,
+      lineSubtotal: calc.lineSubtotal,
+      costTotal: calc.estimatedCost,
+    };
+    const totals = calculateCartItemTotals(updatedBase, taxCurrency);
+    return { ...updatedBase, ...totals };
+  }
+
+  const unitCost =
+    item.effectiveQuantity > 0
+      ? safeNonNegative(item.costTotal, 0) / item.effectiveQuantity
+      : 0;
+  const nextSubtotal = roundAmount(safeNonNegative(item.unitPrice, 0) * safeNextQty, taxCurrency);
+  const nextCostTotal = roundAmount(unitCost * safeNextQty, taxCurrency);
+  const updatedBase: CartItem = {
+    ...item,
+    effectiveQuantity: safeNextQty,
+    lineSubtotal: nextSubtotal,
+    costTotal: nextCostTotal,
+    config: { ...item.config, quantity: safeNextQty },
+  };
+  const totals = calculateCartItemTotals(updatedBase, taxCurrency);
+  return { ...updatedBase, ...totals };
 }

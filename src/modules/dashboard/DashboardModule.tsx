@@ -10,7 +10,7 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
-import { isBelowMinimumThreshold } from '../../shared/inventoryModel.ts';
+import { computeDashboardMetrics } from '../../shared/financeModel.ts';
 import { computePredictiveReorderForecasts } from '../../shared/predictiveReorderEngine.ts';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import type { Transaction } from '../../shared/types.ts';
@@ -59,105 +59,18 @@ export const DashboardModule: React.FC = () => {
     [transactions],
   );
 
-  const metrics = useMemo(() => {
-    const now = Date.now();
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const todayMs = startOfToday.getTime();
-    const weekMs = now - 7 * 86400000;
-    const monthMs = now - 30 * 86400000;
-
-    let todaySales = 0;
-    let weeklySales = 0;
-    let monthlySales = 0;
-    let totalCost = 0;
-
-    const serviceMap = new Map<string, { label: string; value: number; count: number }>();
-    const paymentMap = new Map<string, number>();
-
-    for (const t of validSales) {
-      const ts = new Date(t.createdAt).getTime();
-      if (ts >= todayMs) todaySales += t.totalAmount;
-      if (ts >= weekMs) weeklySales += t.totalAmount;
-      if (ts >= monthMs) monthlySales += t.totalAmount;
-
-      const inSelectedRange =
-        range === 'today' ? ts >= todayMs : range === 'week' ? ts >= weekMs : ts >= monthMs;
-
-      if (inSelectedRange) {
-        for (const item of t.items) {
-          totalCost += item.costTotal || 0;
-          const prev = serviceMap.get(item.serviceName) || {
-            label: item.serviceName,
-            value: 0,
-            count: 0,
-          };
-          prev.value += item.lineTotal;
-          prev.count += item.effectiveQuantity;
-          serviceMap.set(item.serviceName, prev);
-        }
-        for (const p of t.payments) {
-          paymentMap.set(p.methodName, (paymentMap.get(p.methodName) || 0) + p.amount);
-        }
-      }
-    }
-
-    const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
-    const activeSalesTotal =
-      range === 'today' ? todaySales : range === 'week' ? weeklySales : monthlySales;
-    const grossProfit = activeSalesTotal - totalCost;
-    const netProfit = grossProfit - totalExpenses;
-    const outstandingBalances = customers.reduce((s, c) => s + c.outstandingBalance, 0);
-    const pendingJobsCount = printJobs.filter(
-      (j) => !['completed', 'cancelled'].includes(j.productionStatus),
-    ).length;
-    const completedJobsCount = printJobs.filter((j) => j.productionStatus === 'completed').length;
-    const lowStockItems = inventory.filter(
-      (i) => i.quantityOnHand <= i.reorderLevel || isBelowMinimumThreshold(i),
-    );
-
-    // Build 7-day trend
-    const trendPoints: Array<{ label: string; value: number }> = [];
-    for (let d = 6; d >= 0; d--) {
-      const day = new Date(Date.now() - d * 86400000);
-      const dayStr = day.toISOString().slice(0, 10);
-      const label = day.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      const sum = validSales
-        .filter((t) => t.createdAt.slice(0, 10) === dayStr)
-        .reduce((s, t) => s + t.totalAmount, 0);
-      trendPoints.push({ label, value: sum });
-    }
-
-    const topServices = Array.from(serviceMap.values())
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 5)
-      .map((s) => ({
-        label: s.label,
-        value: s.value,
-        subtitle: `${Math.round(s.count)} units`,
-      }));
-
-    const paymentBreakdown = Array.from(paymentMap.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([label, value]) => ({ label, value }));
-
-    return {
-      todaySales,
-      weeklySales,
-      monthlySales,
-      totalTransactions: validSales.length,
-      grossProfit,
-      netProfit,
-      totalExpenses,
-      outstandingBalances,
-      pendingJobsCount,
-      completedJobsCount,
-      lowStockItems,
-      trendPoints,
-      topServices,
-      paymentBreakdown,
-    };
-  }, [validSales, expenses, customers, printJobs, inventory, range]);
+  const metrics = useMemo(
+    () =>
+      computeDashboardMetrics({
+        validSales,
+        expenses,
+        customers,
+        printJobs,
+        inventory,
+        range,
+      }),
+    [validSales, expenses, customers, printJobs, inventory, range],
+  );
 
   const predictiveForecasts = useMemo(
     () =>

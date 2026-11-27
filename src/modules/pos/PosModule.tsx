@@ -22,6 +22,7 @@ import {
   calculateServicePrice,
   formatCurrency,
   getDefaultServiceSelection,
+  recalculateCartItemQuantity,
 } from '../../shared/pricingEngine.ts';
 import type {
   CartItem,
@@ -190,16 +191,10 @@ export const PosModule: React.FC<PosModuleProps> = ({ layoutTier }) => {
     setCart((prev) =>
       prev.map((item) => {
         if (item.id !== itemId) return item;
-        const unit = item.effectiveQuantity > 0 ? item.lineSubtotal / item.effectiveQuantity : item.unitPrice;
-        const nextSubtotal = Number((unit * nextQty).toFixed(2));
-        const updated = {
-          ...item,
-          effectiveQuantity: nextQty,
-          lineSubtotal: nextSubtotal,
-          config: { ...item.config, quantity: nextQty },
-        };
-        const totals = calculateCartItemTotals(updated, taxCurr);
-        return { ...updated, ...totals };
+        const matchingService = !item.isCustomItem
+          ? services.find((s) => s.id === item.serviceId)
+          : undefined;
+        return recalculateCartItemQuantity(item, nextQty, matchingService, taxCurr);
       }),
     );
   };
@@ -481,7 +476,18 @@ export const PosModule: React.FC<PosModuleProps> = ({ layoutTier }) => {
               <div className="flex items-center justify-between gap-2">
                 <QuantityStepper
                   compact
-                  value={Math.max(1, Math.round(item.effectiveQuantity))}
+                  value={(() => {
+                    const srv = !item.isCustomItem
+                      ? services.find((s) => s.id === item.serviceId)
+                      : undefined;
+                    if (srv?.allowPagesAndCopies) {
+                      return Math.max(1, Math.round(item.config?.copies ?? 1));
+                    }
+                    if (srv) {
+                      return Math.max(1, Math.round(item.config?.quantity ?? 1));
+                    }
+                    return Math.max(1, Math.round(item.effectiveQuantity));
+                  })()}
                   onChange={(next) => handleUpdateCartQuantity(item.id, next)}
                 />
                 <button

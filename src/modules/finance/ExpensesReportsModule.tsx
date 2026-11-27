@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Download, Plus, Printer, Trash2 } from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
+import { computeProfitAndLossReport } from '../../shared/financeModel.ts';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
 import { downloadCsv } from '../../services/hardwareService.ts';
 import type { ExpenseRecord } from '../../shared/types.ts';
@@ -54,56 +55,17 @@ export const ExpensesReportsModule: React.FC = () => {
     return expenses.filter((e) => e.expenseDate >= dateFrom && e.expenseDate <= dateTo);
   }, [expenses, dateFrom, dateTo]);
 
-  const pnl = useMemo(() => {
-    const active = rangedTxns.filter(
-      (t) => t.paymentStatus !== 'voided' && t.paymentStatus !== 'refunded',
-    );
-    const revenue = active.reduce((s, t) => s + t.totalAmount, 0);
-    const cashReceived = active.reduce((s, t) => s + t.amountPaid, 0);
-    const receivables = customers.reduce((s, c) => s + c.outstandingBalance, 0);
-    const estimatedMaterialCost = active.reduce(
-      (s, t) => s + t.items.reduce((is, i) => is + (i.costTotal || 0), 0),
-      0,
-    );
-    const operatingExpenses = rangedExpenses.reduce((s, e) => s + e.amount, 0);
-    const grossProfit = revenue - estimatedMaterialCost;
-    const netProfit = grossProfit - operatingExpenses;
-
-    const byCategory = new Map<string, number>();
-    const byService = new Map<string, number>();
-    const byCashier = new Map<string, number>();
-    const byPayment = new Map<string, number>();
-
-    for (const t of active) {
-      byCashier.set(t.cashierName, (byCashier.get(t.cashierName) || 0) + t.totalAmount);
-      for (const p of t.payments) {
-        byPayment.set(p.methodName, (byPayment.get(p.methodName) || 0) + p.amount);
-      }
-      for (const i of t.items) {
-        byService.set(i.serviceName, (byService.get(i.serviceName) || 0) + i.lineTotal);
-        const srv = services.find((s) => s.id === i.serviceId);
-        const catName =
-          categories.find((c) => c.id === srv?.categoryId)?.name || 'Other / Custom';
-        byCategory.set(catName, (byCategory.get(catName) || 0) + i.lineTotal);
-      }
-    }
-
-    return {
-      revenue,
-      cashReceived,
-      receivables,
-      estimatedMaterialCost,
-      operatingExpenses,
-      grossProfit,
-      netProfit,
-      byCategory: Array.from(byCategory.entries()).map(([label, value]) => ({ label, value })),
-      byService: Array.from(byService.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([label, value]) => ({ label, value })),
-      byCashier: Array.from(byCashier.entries()).map(([label, value]) => ({ label, value })),
-      byPayment: Array.from(byPayment.entries()).map(([label, value]) => ({ label, value })),
-    };
-  }, [rangedTxns, rangedExpenses, customers, services, categories]);
+  const pnl = useMemo(
+    () =>
+      computeProfitAndLossReport({
+        rangedTxns,
+        rangedExpenses,
+        customers,
+        services,
+        categories,
+      }),
+    [rangedTxns, rangedExpenses, customers, services, categories],
+  );
 
   const handleExportCsv = () => {
     downloadCsv(

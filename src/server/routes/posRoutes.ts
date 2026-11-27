@@ -70,10 +70,44 @@ export function applyTransactionCreation(
     fallback: 0,
   });
   const taxAmount = parseFiniteNumber(payload.taxAmount, 'Tax amount', { min: 0, fallback: 0 });
-  const totalAmount = parseFiniteNumber(payload.totalAmount, 'Total amount', { min: 0, fallback: 0 });
-  const amountPaid = parseFiniteNumber(payload.amountPaid, 'Amount paid', { min: 0, fallback: 0 });
-  const changeAmount = parseFiniteNumber(payload.changeAmount, 'Change amount', { min: 0, fallback: 0 });
-  const balanceDue = parseFiniteNumber(payload.balanceDue, 'Balance due', { min: 0, fallback: 0 });
+  const safePayments = Array.isArray(payload.payments) ? payload.payments : [];
+  const totalAmount = Number(
+    parseFiniteNumber(payload.totalAmount, 'Total amount', { min: 0, fallback: 0 }).toFixed(2),
+  );
+  const rawAmountPaid = parseFiniteNumber(payload.amountPaid, 'Amount paid', { min: 0, fallback: 0 });
+  parseFiniteNumber(payload.changeAmount, 'Change amount', { min: 0, fallback: 0 });
+  parseFiniteNumber(payload.balanceDue, 'Balance due', { min: 0, fallback: 0 });
+
+  const sumPayments = Number(
+    safePayments
+      .reduce((s, p) => s + Math.max(0, safeFinite(p?.amount, 0)), 0)
+      .toFixed(2),
+  );
+  const hasPayments = safePayments.length > 0;
+
+  let amountPaid: number;
+  let changeAmount: number;
+  let balanceDue: number;
+  let paymentStatus: Transaction['paymentStatus'];
+
+  if (payload.type === 'sale') {
+    const tendered = hasPayments ? sumPayments : rawAmountPaid;
+    amountPaid = Number(Math.min(totalAmount, tendered).toFixed(2));
+    changeAmount = Math.max(0, Number((tendered - totalAmount).toFixed(2)));
+    balanceDue = Math.max(0, Number((totalAmount - amountPaid).toFixed(2)));
+    if (balanceDue <= 0.005) {
+      paymentStatus = 'paid';
+    } else if (amountPaid > 0) {
+      paymentStatus = 'partial';
+    } else {
+      paymentStatus = 'unpaid';
+    }
+  } else {
+    amountPaid = 0;
+    changeAmount = 0;
+    balanceDue = totalAmount;
+    paymentStatus = 'unpaid';
+  }
 
   const txId = (typeof payload.id === 'string' && payload.id.trim()) || genId('txn');
   const receiptNumber =
@@ -83,7 +117,6 @@ export function applyTransactionCreation(
       .slice(2, 10)
       .replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
   const now = (typeof payload.createdAt === 'string' && payload.createdAt.trim()) || new Date().toISOString();
-  const safePayments = Array.isArray(payload.payments) ? payload.payments : [];
 
   const runAtomic = db.transaction(() => {
     db.prepare(`
@@ -114,7 +147,7 @@ export function applyTransactionCreation(
       amountPaid,
       changeAmount,
       balanceDue,
-      payload.paymentStatus,
+      paymentStatus,
       JSON.stringify(safePayments),
       optionalString(payload.notes, 800, ''),
       now,
@@ -208,10 +241,10 @@ export function applyTransactionCreation(
           prodItems[0].serviceName + (prodItems.length > 1 ? ` +${prodItems.length - 1}` : ''),
           specs,
           payload.notes || '',
-          payload.paymentStatus,
-          Number(payload.totalAmount) || 0,
-          Number(payload.amountPaid) || 0,
-          Number(payload.balanceDue) || 0,
+          paymentStatus,
+          totalAmount,
+          amountPaid,
+          balanceDue,
           new Date(Date.now() + 3600000 * 4).toISOString(),
           new Date(Date.now() + 3600000 * 24).toISOString(),
           JSON.stringify([
@@ -231,9 +264,9 @@ export function applyTransactionCreation(
         const pointsEarned = Math.floor(amountPaid / 10);
         db.prepare(`
           UPDATE customers
-          SET total_spent = total_spent + ?,
+          SET total_spent = ROUND(total_spent + ?, 2),
               loyalty_points = loyalty_points + ?,
-              outstanding_balance = outstanding_balance + ?
+              outstanding_balance = ROUND(outstanding_balance + ?, 2)
           WHERE id = ?
         `).run(amountPaid, pointsEarned, balanceDue, payload.customerId);
       }
@@ -242,16 +275,21 @@ export function applyTransactionCreation(
         const cashPaid = safePayments
           .filter((p) => p && p.methodType === 'cash')
           .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0);
-        const netCashAdded = Math.max(0, cashPaid - changeAmount);
-        const electronicPaid = safePayments
-          .filter((p) => p && p.methodType !== 'cash' && p.methodType !== 'credit_balance')
-          .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0);
+        const netCashAdded = hasPayments
+          ? Math.max(0, Number((cashPaid - changeAmount).toFixed(2)))
+          : amountPaid;
+        const electronicPaid = Number(
+          safePayments
+            .filter((p) => p && p.methodType !== 'cash' && p.methodType !== 'credit_balance')
+            .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0)
+            .toFixed(2),
+        );
 
         db.prepare(`
           UPDATE cashier_shifts
-          SET cash_sales = cash_sales + ?,
-              electronic_sales = electronic_sales + ?,
-              expected_cash = expected_cash + ?
+          SET cash_sales = ROUND(cash_sales + ?, 2),
+              electronic_sales = ROUND(electronic_sales + ?, 2),
+              expected_cash = ROUND(expected_cash + ?, 2)
           WHERE id = ? AND status = 'open'
         `).run(netCashAdded, electronicPaid, netCashAdded, payload.shiftId);
       }
@@ -300,19 +338,129 @@ posRouter.post(
       | Record<string, unknown>
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Transaction not found.' });
+    if (existing.payment_status === 'voided') {
+      return res.status(409).json({ error: 'Transaction is already voided.' });
+    }
+    if (existing.payment_status === 'refunded') {
+      return res.status(409).json({ error: 'Refunded transactions cannot be voided.' });
+    }
 
-    db.prepare("UPDATE transactions SET payment_status = 'voided', void_reason = ? WHERE id = ?").run(
-      String(reason).trim(),
-      id,
+    const cleanReason = String(reason).trim().slice(0, 400);
+    const now = new Date().toISOString();
+    const payments = parseJsonSafe<Array<{ methodType?: string; amount?: number }>>(
+      existing.payments_json as string,
+      [],
     );
-    writeAuditLog(
-      req.authUser!.id,
-      req.authUser!.fullName,
-      'TXN_VOIDED',
-      'transaction',
-      id,
-      `Voided ${existing.receipt_number}: ${reason}`,
+    const paidAmount = safeFinite(existing.amount_paid, 0);
+    const changeAmount = safeFinite(existing.change_amount, 0);
+    const balanceDue = safeFinite(existing.balance_due, 0);
+    const cashPaid = payments
+      .filter((p) => p && p.methodType === 'cash')
+      .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0);
+    const netCashReversed =
+      payments.length > 0
+        ? Math.min(paidAmount, Math.max(0, Number((cashPaid - changeAmount).toFixed(2))))
+        : paidAmount;
+    const electronicReversed = Number(
+      payments
+        .filter((p) => p && p.methodType !== 'cash' && p.methodType !== 'credit_balance')
+        .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0)
+        .toFixed(2),
     );
+
+    const runVoid = db.transaction(() => {
+      db.prepare("UPDATE transactions SET payment_status = 'voided', void_reason = ? WHERE id = ?").run(
+        cleanReason,
+        id,
+      );
+
+      if (existing.type === 'sale') {
+        if (existing.shift_id) {
+          db.prepare(`
+            UPDATE cashier_shifts
+            SET cash_sales = MAX(0, ROUND(cash_sales - ?, 2)),
+                electronic_sales = MAX(0, ROUND(electronic_sales - ?, 2)),
+                expected_cash = MAX(0, ROUND(expected_cash - ?, 2))
+            WHERE id = ? AND status = 'open'
+          `).run(netCashReversed, electronicReversed, netCashReversed, existing.shift_id);
+        }
+
+        if (existing.customer_id) {
+          const pointsEarned = Math.floor(paidAmount / 10);
+          db.prepare(`
+            UPDATE customers
+            SET total_spent = MAX(0, ROUND(total_spent - ?, 2)),
+                loyalty_points = MAX(0, loyalty_points - ?),
+                outstanding_balance = MAX(0, ROUND(outstanding_balance - ?, 2))
+            WHERE id = ?
+          `).run(paidAmount, pointsEarned, balanceDue, existing.customer_id);
+        }
+
+        const saleDeductions = db
+          .prepare(
+            "SELECT * FROM stock_movements WHERE reference_type = 'sale' AND reference = ? AND movement_type = 'sale_deduction'",
+          )
+          .all(String(existing.receipt_number || '')) as Array<Record<string, unknown>>;
+
+        for (const mov of saleDeductions) {
+          const itemId = String(mov.inventory_item_id || '');
+          const actualDeducted = Math.max(
+            0,
+            Number((safeFinite(mov.quantity_before, 0) - safeFinite(mov.balance_after, 0)).toFixed(2)),
+          );
+          if (!itemId || actualDeducted <= 0) continue;
+          const invRow = db
+            .prepare('SELECT id, name, quantity_on_hand, unit_cost FROM inventory_items WHERE id = ?')
+            .get(itemId) as
+            | { id: string; name: string; quantity_on_hand: number; unit_cost: number }
+            | undefined;
+          if (!invRow) continue;
+          const qtyBefore = safeFinite(invRow.quantity_on_hand, 0);
+          const nextQty = Number((qtyBefore + actualDeducted).toFixed(2));
+          db.prepare('UPDATE inventory_items SET quantity_on_hand = ?, updated_at = ? WHERE id = ?').run(
+            nextQty,
+            now,
+            invRow.id,
+          );
+          db.prepare(`
+            INSERT INTO stock_movements (
+              id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
+              balance_after, unit_cost_at_movement, reference_type, reference, performed_by_id,
+              performed_by, note, occurred_at, created_at
+            ) VALUES (?, ?, ?, 'return', ?, ?, ?, ?, 'return', ?, ?, ?, ?, ?, ?)
+          `).run(
+            genId('mov'),
+            invRow.id,
+            invRow.name,
+            qtyBefore,
+            actualDeducted,
+            nextQty,
+            Number(invRow.unit_cost) || 0,
+            String(existing.receipt_number || ''),
+            req.authUser!.id,
+            req.authUser!.fullName,
+            `Stock restored on void (${cleanReason})`,
+            now,
+            now,
+          );
+        }
+
+        db.prepare(
+          "UPDATE print_jobs SET payment_status = 'voided', remaining_balance = 0, updated_at = ? WHERE transaction_id = ?",
+        ).run(now, id);
+      }
+
+      writeAuditLog(
+        req.authUser!.id,
+        req.authUser!.fullName,
+        'TXN_VOIDED',
+        'transaction',
+        id,
+        `Voided ${existing.receipt_number}: ${cleanReason}`,
+      );
+    });
+    runVoid();
+
     const updated = db.prepare('SELECT * FROM transactions WHERE id = ?').get(id) as Record<string, unknown>;
     return res.json(mapTransactionRow(updated));
   },
@@ -332,27 +480,74 @@ posRouter.post(
       | Record<string, unknown>
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Transaction not found.' });
-
-    db.prepare("UPDATE transactions SET payment_status = 'refunded', refund_reason = ? WHERE id = ?").run(
-      String(reason).trim(),
-      id,
-    );
-    if (existing.shift_id) {
-      db.prepare(`
-        UPDATE cashier_shifts
-        SET refunds_total = refunds_total + ?,
-            expected_cash = expected_cash - ?
-        WHERE id = ? AND status = 'open'
-      `).run(Number(existing.amount_paid) || 0, Number(existing.amount_paid) || 0, existing.shift_id);
+    if (existing.type !== 'sale') {
+      return res.status(400).json({ error: 'Only completed sale transactions can be refunded.' });
     }
-    writeAuditLog(
-      req.authUser!.id,
-      req.authUser!.fullName,
-      'TXN_REFUNDED',
-      'transaction',
-      id,
-      `Refunded ${existing.receipt_number}: ${reason}`,
+    if (existing.payment_status === 'refunded') {
+      return res.status(409).json({ error: 'Transaction is already refunded.' });
+    }
+    if (existing.payment_status === 'voided') {
+      return res.status(409).json({ error: 'Voided transactions cannot be refunded.' });
+    }
+
+    const cleanReason = String(reason).trim().slice(0, 400);
+    const now = new Date().toISOString();
+    const payments = parseJsonSafe<Array<{ methodType?: string; amount?: number }>>(
+      existing.payments_json as string,
+      [],
     );
+    const paidAmount = safeFinite(existing.amount_paid, 0);
+    const changeAmount = safeFinite(existing.change_amount, 0);
+    const balanceDue = safeFinite(existing.balance_due, 0);
+    const cashPaid = payments
+      .filter((p) => p && p.methodType === 'cash')
+      .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0);
+    const cashRefund =
+      payments.length > 0
+        ? Math.min(paidAmount, Math.max(0, Number((cashPaid - changeAmount).toFixed(2))))
+        : paidAmount;
+
+    const runRefund = db.transaction(() => {
+      db.prepare("UPDATE transactions SET payment_status = 'refunded', refund_reason = ? WHERE id = ?").run(
+        cleanReason,
+        id,
+      );
+
+      if (existing.shift_id) {
+        db.prepare(`
+          UPDATE cashier_shifts
+          SET refunds_total = ROUND(refunds_total + ?, 2),
+              expected_cash = MAX(0, ROUND(expected_cash - ?, 2))
+          WHERE id = ? AND status = 'open'
+        `).run(paidAmount, cashRefund, existing.shift_id);
+      }
+
+      if (existing.customer_id) {
+        const pointsEarned = Math.floor(paidAmount / 10);
+        db.prepare(`
+          UPDATE customers
+          SET total_spent = MAX(0, ROUND(total_spent - ?, 2)),
+              loyalty_points = MAX(0, loyalty_points - ?),
+              outstanding_balance = MAX(0, ROUND(outstanding_balance - ?, 2))
+          WHERE id = ?
+        `).run(paidAmount, pointsEarned, balanceDue, existing.customer_id);
+      }
+
+      db.prepare(
+        "UPDATE print_jobs SET payment_status = 'refunded', remaining_balance = 0, updated_at = ? WHERE transaction_id = ?",
+      ).run(now, id);
+
+      writeAuditLog(
+        req.authUser!.id,
+        req.authUser!.fullName,
+        'TXN_REFUNDED',
+        'transaction',
+        id,
+        `Refunded ${existing.receipt_number}: ${cleanReason}`,
+      );
+    });
+    runRefund();
+
     const updated = db.prepare('SELECT * FROM transactions WHERE id = ?').get(id) as Record<string, unknown>;
     return res.json(mapTransactionRow(updated));
   },

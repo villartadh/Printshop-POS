@@ -155,7 +155,7 @@ export function buildReorderRequestList(
         : minimumRecoveryQty;
 
     const recommendedOrderQty =
-      forecast && forecast.weightedDailyVelocity > 0 && forecast.suggestedOrderQty > 0
+      forecast && forecast.suggestedOrderQty > 0
         ? forecast.suggestedOrderQty
         : fallbackOrderQty;
 
