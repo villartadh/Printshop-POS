@@ -24,19 +24,24 @@ export const STOCK_MOVEMENT_LABELS: Record<StockMovementType, string> = {
   return: 'Stock Return',
 };
 
+function safeNumber(value: unknown, fallback = 0): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
 export function getAvailableStock(
   item: Pick<InventoryItem, 'quantityOnHand' | 'reservedQuantity'>,
 ): number {
-  const onHand = Number(item.quantityOnHand) || 0;
-  const reserved = Math.max(0, Number(item.reservedQuantity) || 0);
+  const onHand = safeNumber(item?.quantityOnHand, 0);
+  const reserved = Math.max(0, safeNumber(item?.reservedQuantity, 0));
   return Number(Math.max(0, onHand - reserved).toFixed(2));
 }
 
 export function getInventoryStockStatus(
   item: Pick<InventoryItem, 'quantityOnHand' | 'reorderLevel'>,
 ): StockStatus {
-  const onHand = Number(item.quantityOnHand) || 0;
-  const reorder = Number(item.reorderLevel) || 0;
+  const onHand = safeNumber(item?.quantityOnHand, 0);
+  const reorder = safeNumber(item?.reorderLevel, 0);
   if (onHand <= 0) return 'out_of_stock';
   if (onHand <= reorder) return 'low_stock';
   return 'in_stock';
@@ -45,37 +50,38 @@ export function getInventoryStockStatus(
 export function isLowStockItem(
   item: Pick<InventoryItem, 'quantityOnHand' | 'currentStock' | 'reorderLevel' | 'minimumThreshold'>,
 ): boolean {
-  const onHand = Number(item.currentStock ?? item.quantityOnHand) || 0;
-  const reorder = Number(item.reorderLevel) || 0;
+  const onHand = safeNumber(item?.currentStock ?? item?.quantityOnHand, 0);
+  const reorder = safeNumber(item?.reorderLevel, 0);
   return onHand <= reorder || isBelowMinimumThreshold(item);
 }
 
 export function isBelowMinimumThreshold(
   item: Pick<InventoryItem, 'quantityOnHand' | 'currentStock' | 'minimumThreshold'>,
 ): boolean {
-  const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
+  const minThreshold = Math.max(0, safeNumber(item?.minimumThreshold, 0));
   if (minThreshold <= 0) return false;
-  const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
+  const stockCount = Math.max(0, safeNumber(item?.currentStock ?? item?.quantityOnHand, 0));
   return stockCount < minThreshold;
 }
 
 export function getBelowMinimumItems(items: InventoryItem[]): InventoryItem[] {
+  if (!Array.isArray(items)) return [];
   return items
-    .filter((item) => isBelowMinimumThreshold(item))
+    .filter((item) => Boolean(item) && isBelowMinimumThreshold(item))
     .sort((a, b) => {
-      const stockA = Math.max(0, Number(a.currentStock ?? a.quantityOnHand) || 0);
-      const stockB = Math.max(0, Number(b.currentStock ?? b.quantityOnHand) || 0);
+      const stockA = Math.max(0, safeNumber(a.currentStock ?? a.quantityOnHand, 0));
+      const stockB = Math.max(0, safeNumber(b.currentStock ?? b.quantityOnHand, 0));
       if ((stockA <= 0) !== (stockB <= 0)) {
         return stockA <= 0 ? -1 : 1;
       }
-      const minA = Math.max(1, Number(a.minimumThreshold) || 1);
-      const minB = Math.max(1, Number(b.minimumThreshold) || 1);
+      const minA = Math.max(1, safeNumber(a.minimumThreshold, 1));
+      const minB = Math.max(1, safeNumber(b.minimumThreshold, 1));
       const ratioA = stockA / minA;
       const ratioB = stockB / minB;
       if (Math.abs(ratioA - ratioB) > 0.001) {
         return ratioA - ratioB;
       }
-      return a.name.localeCompare(b.name);
+      return (a.name || '').localeCompare(b.name || '');
     });
 }
 
@@ -84,16 +90,17 @@ export function buildReorderRequestList(
   scope: ReorderRequestScope = 'below_minimum',
   forecastsByItemId?: Map<string, PredictiveReorderForecast>,
 ): ReorderRequestItem[] {
+  const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
   const targetItems =
     scope === 'below_minimum'
-      ? getBelowMinimumItems(items)
+      ? getBelowMinimumItems(safeItems)
       : scope === 'nearing_threshold'
-        ? items
+        ? safeItems
             .filter((item) => {
               const forecast = forecastsByItemId?.get(item.id);
               if (forecast) return forecast.isNearingThreshold;
-              const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
-              const reorderLevel = Math.max(0, Number(item.reorderLevel) || 0);
+              const stockCount = Math.max(0, safeNumber(item.currentStock ?? item.quantityOnHand, 0));
+              const reorderLevel = Math.max(0, safeNumber(item.reorderLevel, 0));
               return (
                 stockCount <= 0 ||
                 stockCount <= reorderLevel ||
@@ -108,10 +115,10 @@ export function buildReorderRequestList(
               }
               return a.name.localeCompare(b.name);
             })
-        : items
+        : safeItems
             .filter((item) => {
-              const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
-              const reorderLevel = Math.max(0, Number(item.reorderLevel) || 0);
+              const stockCount = Math.max(0, safeNumber(item.currentStock ?? item.quantityOnHand, 0));
+              const reorderLevel = Math.max(0, safeNumber(item.reorderLevel, 0));
               return (
                 stockCount <= 0 ||
                 stockCount <= reorderLevel ||
@@ -122,10 +129,10 @@ export function buildReorderRequestList(
               const belowA = isBelowMinimumThreshold(a);
               const belowB = isBelowMinimumThreshold(b);
               if (belowA !== belowB) return belowA ? -1 : 1;
-              const stockA = Math.max(0, Number(a.currentStock ?? a.quantityOnHand) || 0);
-              const stockB = Math.max(0, Number(b.currentStock ?? b.quantityOnHand) || 0);
+              const stockA = Math.max(0, safeNumber(a.currentStock ?? a.quantityOnHand, 0));
+              const stockB = Math.max(0, safeNumber(b.currentStock ?? b.quantityOnHand, 0));
               if ((stockA <= 0) !== (stockB <= 0)) return stockA <= 0 ? -1 : 1;
-              return a.name.localeCompare(b.name);
+              return (a.name || '').localeCompare(b.name || '');
             });
 
   return targetItems.map((item) => {
@@ -191,7 +198,8 @@ export function buildInventoryAlertNotifications(
   breachSignature: string;
   notifications: InventoryAlertNotification[];
 } {
-  const belowMinimumItems = getBelowMinimumItems(items);
+  const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
+  const belowMinimumItems = getBelowMinimumItems(safeItems);
   const hasSimultaneousBreach = belowMinimumItems.length >= 2;
   const breachIds = belowMinimumItems.map((i) => i.id).sort();
   const breachSignature = hasSimultaneousBreach
@@ -226,8 +234,8 @@ export function buildInventoryAlertNotifications(
   }
 
   for (const item of belowMinimumItems) {
-    const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
-    const minThreshold = Math.max(0, Number(item.minimumThreshold) || 0);
+    const stockCount = Math.max(0, safeNumber(item.currentStock ?? item.quantityOnHand, 0));
+    const minThreshold = Math.max(0, safeNumber(item.minimumThreshold, 0));
     const isOut = stockCount <= 0;
     notifications.push({
       id: `notif-min-${item.id}`,
@@ -244,14 +252,14 @@ export function buildInventoryAlertNotifications(
     });
   }
 
-  const warningItems = items
+  const warningItems = safeItems
     .filter((item) => {
       if (isBelowMinimumThreshold(item)) return false;
-      const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
-      const reorder = Math.max(0, Number(item.reorderLevel) || 0);
+      const stockCount = Math.max(0, safeNumber(item.currentStock ?? item.quantityOnHand, 0));
+      const reorder = Math.max(0, safeNumber(item.reorderLevel, 0));
       return stockCount <= 0 || stockCount <= reorder;
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
   for (const item of warningItems) {
     const stockCount = Math.max(0, Number(item.currentStock ?? item.quantityOnHand) || 0);
@@ -309,11 +317,13 @@ export function extractSupplierInfo(item: InventoryItem): InventorySupplierInfo 
 }
 
 export function calculateInventoryValuation(items: InventoryItem[]): number {
+  if (!Array.isArray(items)) return 0;
   return Number(
     items
+      .filter(Boolean)
       .reduce(
         (sum, item) =>
-          sum + Math.max(0, Number(item.quantityOnHand) || 0) * (Number(item.unitCost) || 0),
+          sum + Math.max(0, safeNumber(item.quantityOnHand, 0)) * Math.max(0, safeNumber(item.unitCost, 0)),
         0,
       )
       .toFixed(2),
@@ -324,7 +334,7 @@ export function computeSignedStockDelta(
   movementType: StockMovementType,
   rawDelta: number,
 ): number {
-  const num = Number(rawDelta) || 0;
+  const num = safeNumber(rawDelta, 0);
   if (
     movementType === 'wastage' ||
     movementType === 'damaged' ||
@@ -366,10 +376,12 @@ export function resolveSupplyCategory(
   categories: SupplyCategory[],
   categoryIdOrName?: string,
 ): SupplyCategory | undefined {
-  if (!categoryIdOrName) return undefined;
+  if (!Array.isArray(categories) || typeof categoryIdOrName !== 'string' || !categoryIdOrName.trim()) {
+    return undefined;
+  }
   const target = categoryIdOrName.trim().toLowerCase();
   return categories.find(
-    (c) => c.id.toLowerCase() === target || c.name.toLowerCase() === target,
+    (c) => Boolean(c) && ((c.id || '').toLowerCase() === target || (c.name || '').toLowerCase() === target),
   );
 }
 
@@ -378,31 +390,34 @@ export function filterInventoryItems(
   filter: InventoryStockFilter,
   categories: SupplyCategory[] = [],
 ): InventoryItem[] {
-  const q = (filter.search || '').trim().toLowerCase();
-  const targetCat = filter.categoryId && filter.categoryId !== 'all'
-    ? resolveSupplyCategory(categories, filter.categoryId)
+  if (!Array.isArray(items)) return [];
+  const safeFilter = filter ?? ({} as InventoryStockFilter);
+  const q = (typeof safeFilter.search === 'string' ? safeFilter.search : '').trim().toLowerCase();
+  const targetCat = safeFilter.categoryId && safeFilter.categoryId !== 'all'
+    ? resolveSupplyCategory(categories, safeFilter.categoryId)
     : undefined;
 
   return items.filter((item) => {
-    if (filter.stockStatus && filter.stockStatus !== 'all') {
-      if (getInventoryStockStatus(item) !== filter.stockStatus) return false;
+    if (!item) return false;
+    if (safeFilter.stockStatus && safeFilter.stockStatus !== 'all') {
+      if (getInventoryStockStatus(item) !== safeFilter.stockStatus) return false;
     }
-    if (filter.itemType && filter.itemType !== 'all') {
-      if (item.itemType !== filter.itemType) return false;
+    if (safeFilter.itemType && safeFilter.itemType !== 'all') {
+      if (item.itemType !== safeFilter.itemType) return false;
     }
-    if (filter.categoryId && filter.categoryId !== 'all') {
-      const matchesId = item.categoryId === filter.categoryId;
-      const matchesName =
-        targetCat && item.category.toLowerCase() === targetCat.name.toLowerCase();
-      const matchesRaw = item.category.toLowerCase() === filter.categoryId.toLowerCase();
+    if (safeFilter.categoryId && safeFilter.categoryId !== 'all') {
+      const catLower = (item.category || '').toLowerCase();
+      const matchesId = item.categoryId === safeFilter.categoryId;
+      const matchesName = targetCat && catLower === targetCat.name.toLowerCase();
+      const matchesRaw = catLower === safeFilter.categoryId.toLowerCase();
       if (!matchesId && !matchesName && !matchesRaw) return false;
     }
     if (q) {
       const supplierName = (item.supplierInfo?.name || item.supplier || '').toLowerCase();
       const hit =
-        item.name.toLowerCase().includes(q) ||
-        item.sku.toLowerCase().includes(q) ||
-        item.category.toLowerCase().includes(q) ||
+        (item.name || '').toLowerCase().includes(q) ||
+        (item.sku || '').toLowerCase().includes(q) ||
+        (item.category || '').toLowerCase().includes(q) ||
         supplierName.includes(q) ||
         (item.storageLocation || '').toLowerCase().includes(q);
       if (!hit) return false;
@@ -496,10 +511,12 @@ export function findDuplicateSkuItem<T extends Pick<InventoryItem, 'id' | 'sku' 
   existingItems: T[],
   excludeItemId?: string,
 ): T | undefined {
+  if (typeof candidateSku !== 'string' || !Array.isArray(existingItems)) return undefined;
   const normalized = candidateSku.trim().toUpperCase();
   if (!normalized) return undefined;
   return existingItems.find(
     (item) =>
+      Boolean(item) &&
       (!excludeItemId || item.id !== excludeItemId) &&
       (item.sku || '').trim().toUpperCase() === normalized,
   );
@@ -670,39 +687,87 @@ export function normalizeStockMovement(
   };
 }
 
+function validateOptionalNonNegativeNumber(
+  value: unknown,
+  label: string,
+  max = 1_000_000_000,
+): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) {
+    return `${label} must be a valid number.`;
+  }
+  if (num < 0) {
+    return `${label} cannot be negative.`;
+  }
+  if (num > max) {
+    return `${label} exceeds the maximum allowed value.`;
+  }
+  return null;
+}
+
 export function validateInventoryItemInput(
   input: Partial<InventoryItem>,
 ): { valid: true } | { valid: false; error: string } {
-  if (!input.name || !input.name.trim()) {
+  if (!input || typeof input !== 'object') {
+    return { valid: false, error: 'Inventory item payload is required.' };
+  }
+  if (typeof input.name !== 'string' || !input.name.trim()) {
     return { valid: false, error: 'Item name is required.' };
   }
-  if (!input.unit || !input.unit.trim()) {
+  if (input.name.trim().length > 160) {
+    return { valid: false, error: 'Item name cannot exceed 160 characters.' };
+  }
+  if (typeof input.unit !== 'string' || !input.unit.trim()) {
     return { valid: false, error: 'Stock unit (e.g., sheet, pc, sq ft) is required.' };
   }
-  const stockVal = input.quantityOnHand ?? input.currentStock;
-  if (stockVal !== undefined && Number(stockVal) < 0) {
-    return { valid: false, error: 'Quantity on hand cannot be negative.' };
+  if (input.unit.trim().length > 40) {
+    return { valid: false, error: 'Stock unit cannot exceed 40 characters.' };
   }
-  const thresholdVal = input.reorderLevel ?? input.reorderThreshold;
-  if (thresholdVal !== undefined && Number(thresholdVal) < 0) {
-    return { valid: false, error: 'Reorder level cannot be negative.' };
+
+  const checks = [
+    validateOptionalNonNegativeNumber(
+      input.quantityOnHand ?? input.currentStock,
+      'Quantity on hand',
+    ),
+    validateOptionalNonNegativeNumber(
+      input.reorderLevel ?? input.reorderThreshold,
+      'Reorder level',
+    ),
+    validateOptionalNonNegativeNumber(input.minimumThreshold, 'Minimum threshold'),
+    validateOptionalNonNegativeNumber(input.reorderQuantity, 'Reorder quantity'),
+    validateOptionalNonNegativeNumber(input.reservedQuantity, 'Reserved quantity'),
+    validateOptionalNonNegativeNumber(input.unitCost, 'Unit cost'),
+    validateOptionalNonNegativeNumber(input.leadTimeDays, 'Lead time days', 3650),
+  ];
+
+  for (const err of checks) {
+    if (err) return { valid: false, error: err };
   }
-  if (input.minimumThreshold !== undefined && Number(input.minimumThreshold) < 0) {
-    return { valid: false, error: 'Minimum threshold cannot be negative.' };
-  }
-  if (input.unitCost !== undefined && Number(input.unitCost) < 0) {
-    return { valid: false, error: 'Unit cost cannot be negative.' };
-  }
+
   return { valid: true };
 }
 
 export function validateStockMovementInput(input: {
   movementType?: StockMovementType;
-  quantityDelta?: number;
+  quantityDelta?: unknown;
 }): { valid: true } | { valid: false; error: string } {
-  const delta = Number(input.quantityDelta) || 0;
+  if (!input || typeof input !== 'object') {
+    return { valid: false, error: 'Stock movement details are required.' };
+  }
+  const raw = input.quantityDelta;
+  if (raw === undefined || raw === null || raw === '') {
+    return { valid: false, error: 'Stock quantity change must be non-zero.' };
+  }
+  const delta = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(delta)) {
+    return { valid: false, error: 'Stock quantity change must be a valid number.' };
+  }
   if (delta === 0) {
     return { valid: false, error: 'Stock quantity change must be non-zero.' };
+  }
+  if (Math.abs(delta) > 10_000_000) {
+    return { valid: false, error: 'Stock quantity change exceeds the allowed limit.' };
   }
   return { valid: true };
 }

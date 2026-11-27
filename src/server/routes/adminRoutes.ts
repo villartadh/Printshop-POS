@@ -175,7 +175,7 @@ adminRouter.put(
       'default',
       `Updated off-hours/weekend alert schedule (${saved.enabled ? 'enabled' : 'paused'}, channel: ${saved.channel})`,
     );
-    res.json({
+    return res.json({
       config: saved,
       smtpConfigured: isSmtpConfigured(),
       scheduleStatus: evaluateOffHoursScheduleWindow(saved),
@@ -244,6 +244,6 @@ adminRouter.post(
     if (!updated) {
       return res.status(404).json({ error: 'Critical alert event not found.' });
     }
-    res.json({ event: updated });
+    return res.json({ event: updated });
   },
 );

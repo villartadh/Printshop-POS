@@ -52,7 +52,7 @@ export function verifySessionToken(token: string): { sid: string; uid: string } 
   }
 }
 
-interface UserRow {
+export interface UserRow {
   id: string;
   username: string;
   full_name: string;
@@ -115,7 +115,7 @@ export function requireAuth(req: AuthenticatedRequest, res: Response, next: Next
 
   req.authUser = sanitizeUser(userRow);
   req.sessionId = session.id;
-  next();
+  return next();
 }
 
 export function requireRole(allowedRoles: UserRole[]) {
@@ -126,7 +126,7 @@ export function requireRole(allowedRoles: UserRole[]) {
     if (!allowedRoles.includes(req.authUser.role)) {
       return res.status(403).json({ error: 'Permission denied for your current role.' });
     }
-    next();
+    return next();
   };
 }
 

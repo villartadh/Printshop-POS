@@ -2,7 +2,7 @@ import express from 'express';
 import { db, writeAuditLog } from '../db.ts';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../auth.ts';
 import { evaluateAndDispatchCriticalAlerts } from '../criticalAlertService.ts';
-import { HttpError } from '../httpUtils.ts';
+import { HttpError, parseFiniteNumber, requireNonEmptyString, requirePlainObject } from '../httpUtils.ts';
 import { genId, mapInventoryItemRow, mapStockMovementRow } from '../mappers.ts';
 import {
   computeSignedStockDelta,
@@ -38,7 +38,8 @@ export function applyInventoryAdjustment(
   actorId: string,
   actorName: string,
 ) {
-  const existing = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as
+  const cleanId = requireNonEmptyString(id, 'Inventory item ID', 120);
+  const existing = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(cleanId) as
     | Record<string, unknown>
     | undefined;
   if (!existing) {
@@ -49,25 +50,27 @@ export function applyInventoryAdjustment(
     'adjustment') as StockMovementType;
   const validation = validateStockMovementInput({
     movementType: resolvedMovementType,
-    quantityDelta: Number(payload.quantityDelta) || 0,
+    quantityDelta: payload.quantityDelta,
   });
   if (!validation.valid) {
     throw new HttpError(400, validation.error);
   }
 
-  const signedDelta = computeSignedStockDelta(
-    resolvedMovementType,
-    Number(payload.quantityDelta) || 0,
-  );
+  const parsedDelta = Number(payload.quantityDelta);
+  const signedDelta = computeSignedStockDelta(resolvedMovementType, parsedDelta);
   const qtyBefore = Number(existing.quantity_on_hand) || 0;
   const nextQty = Math.max(0, Number((qtyBefore + signedDelta).toFixed(2)));
   const now = new Date().toISOString();
   const effectiveTimestamp =
-    typeof payload.occurredAt === 'string' && payload.occurredAt ? payload.occurredAt : now;
+    typeof payload.occurredAt === 'string' && payload.occurredAt.trim()
+      ? payload.occurredAt.trim().slice(0, 64)
+      : now;
   const orderedAtStr =
-    typeof payload.orderedAt === 'string' && payload.orderedAt ? payload.orderedAt.trim().slice(0, 64) : '';
+    typeof payload.orderedAt === 'string' && payload.orderedAt.trim()
+      ? payload.orderedAt.trim().slice(0, 64)
+      : '';
   const expectedDeliveryAtStr =
-    typeof payload.expectedDeliveryAt === 'string' && payload.expectedDeliveryAt
+    typeof payload.expectedDeliveryAt === 'string' && payload.expectedDeliveryAt.trim()
       ? payload.expectedDeliveryAt.trim().slice(0, 64)
       : '';
   const restockedAt =
@@ -78,16 +81,15 @@ export function applyInventoryAdjustment(
         : null;
 
   const hasCustomUnitCost =
-    payload.unitCost !== undefined &&
-    Number.isFinite(Number(payload.unitCost)) &&
-    Number(payload.unitCost) >= 0;
-  const movementUnitCost = hasCustomUnitCost
-    ? Number(Number(payload.unitCost).toFixed(2))
-    : Number(existing.unit_cost) || 0;
+    payload.unitCost !== undefined && payload.unitCost !== null && payload.unitCost !== ('' as unknown);
+  const validatedCustomCost = hasCustomUnitCost
+    ? Number(parseFiniteNumber(payload.unitCost, 'Unit cost', { min: 0, max: 1_000_000_000 }).toFixed(2))
+    : undefined;
+  const movementUnitCost = validatedCustomCost ?? (Number(existing.unit_cost) || 0);
   const nextItemUnitCost =
-    hasCustomUnitCost &&
+    validatedCustomCost !== undefined &&
     (resolvedMovementType === 'purchase' || resolvedMovementType === 'initial_stock')
-      ? movementUnitCost
+      ? validatedCustomCost
       : Number(existing.unit_cost) || 0;
 
   const movementId = genId('mov');
@@ -96,7 +98,7 @@ export function applyInventoryAdjustment(
   const run = db.transaction(() => {
     db.prepare(
       'UPDATE inventory_items SET quantity_on_hand = ?, unit_cost = ?, last_restocked_at = ?, updated_at = ? WHERE id = ?',
-    ).run(nextQty, nextItemUnitCost, restockedAt, now, id);
+    ).run(nextQty, nextItemUnitCost, restockedAt, now, cleanId);
     db.prepare(`
       INSERT INTO stock_movements (
         id, inventory_item_id, item_name, movement_type, quantity_before, quantity_delta,
@@ -105,7 +107,7 @@ export function applyInventoryAdjustment(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       movementId,
-      id,
+      cleanId,
       String(existing.name),
       resolvedMovementType,
       qtyBefore,
@@ -113,10 +115,10 @@ export function applyInventoryAdjustment(
       nextQty,
       movementUnitCost,
       resolvedRefType,
-      payload.reference || '',
+      typeof payload.reference === 'string' ? payload.reference.trim().slice(0, 120) : '',
       actorId,
       actorName,
-      payload.note || '',
+      typeof payload.note === 'string' ? payload.note.trim().slice(0, 400) : '',
       effectiveTimestamp,
       orderedAtStr,
       expectedDeliveryAtStr,
@@ -127,13 +129,13 @@ export function applyInventoryAdjustment(
 
   if (signedDelta < 0) {
     void evaluateAndDispatchCriticalAlerts({
-      targetItemIds: [id],
+      targetItemIds: [cleanId],
       actorId,
       actorName,
     }).catch(() => undefined);
   }
 
-  const updatedRow = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<
+  const updatedRow = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(cleanId) as Record<
     string,
     unknown
   >;
@@ -143,7 +145,7 @@ export function applyInventoryAdjustment(
   >;
 
   return {
-    id,
+    id: cleanId,
     quantityOnHand: nextQty,
     lastRestockedAt: restockedAt,
     updatedAt: now,
@@ -294,7 +296,7 @@ inventoryRouter.post(
     run();
 
     const created = db.prepare('SELECT * FROM inventory_items WHERE id = ?').get(id) as Record<string, unknown>;
-    res.status(201).json(mapInventoryItemRow(created));
+    return res.status(201).json(mapInventoryItemRow(created));
   },
 );
 
@@ -458,7 +460,7 @@ inventoryRouter.patch(
       .prepare(`SELECT * FROM inventory_items WHERE id IN (${placeholders}) ORDER BY name ASC`)
       .all(...ids) as Array<Record<string, unknown>>;
 
-    res.json({
+    return res.json({
       items: updatedRows.map(mapInventoryItemRow),
       updatedCount: updatedRows.length,
     });
@@ -588,7 +590,7 @@ inventoryRouter.post(
       .prepare(`SELECT * FROM inventory_items WHERE id IN (${placeholders}) ORDER BY name ASC`)
       .all(...uniqueIds) as Array<Record<string, unknown>>;
 
-    res.json({
+    return res.json({
       items: updatedRows.map(mapInventoryItemRow),
       updatedCount: updatedRows.length,
     });
@@ -607,43 +609,64 @@ inventoryRouter.patch(
     if (!existing) {
       return res.status(404).json({ error: 'Inventory item not found.' });
     }
-    const patch = req.body as Partial<InventoryItem>;
+    const patch = requirePlainObject(req.body, 'Inventory update payload') as Partial<InventoryItem>;
     const now = new Date().toISOString();
+
+    if (patch.name !== undefined && (typeof patch.name !== 'string' || !patch.name.trim())) {
+      return res.status(400).json({ error: 'Item name cannot be empty.' });
+    }
+    if (patch.unit !== undefined && (typeof patch.unit !== 'string' || !patch.unit.trim())) {
+      return res.status(400).json({ error: 'Stock unit cannot be empty.' });
+    }
 
     const patchDetails = patch.supplierDetails ?? patch.supplierInfo;
     const nextSupplier =
       patch.supplier !== undefined
-        ? String(patch.supplier).trim()
+        ? String(patch.supplier).trim().slice(0, 160)
         : patchDetails?.name !== undefined
-          ? String(patchDetails.name).trim()
+          ? String(patchDetails.name).trim().slice(0, 160)
           : String(existing.supplier || '');
     const nextSupplierContact =
       patch.supplierContact !== undefined
-        ? String(patch.supplierContact).trim()
+        ? String(patch.supplierContact).trim().slice(0, 160)
         : patchDetails?.contact !== undefined
-          ? String(patchDetails.contact).trim()
+          ? String(patchDetails.contact).trim().slice(0, 160)
           : String(existing.supplier_contact || '');
     const nextSupplierSku =
       patch.supplierSku !== undefined
-        ? String(patch.supplierSku).trim()
+        ? String(patch.supplierSku).trim().slice(0, 80)
         : patchDetails?.supplierSku !== undefined
-          ? String(patchDetails.supplierSku).trim()
+          ? String(patchDetails.supplierSku).trim().slice(0, 80)
           : String(existing.supplier_sku || '');
+
+    const rawLeadTime = patch.leadTimeDays ?? patchDetails?.leadTimeDays;
     const nextLeadTime =
-      patch.leadTimeDays !== undefined
-        ? Math.max(0, Number(patch.leadTimeDays) || 0)
-        : patchDetails?.leadTimeDays !== undefined
-          ? Math.max(0, Number(patchDetails.leadTimeDays) || 0)
-          : Number(existing.lead_time_days) || 0;
+      rawLeadTime !== undefined
+        ? parseFiniteNumber(rawLeadTime, 'Lead time days', { min: 0, max: 3650, integer: true })
+        : Number(existing.lead_time_days) || 0;
 
     const patchReorder = patch.reorderLevel ?? patch.reorderThreshold;
 
-    if (
-      patch.minimumThreshold !== undefined &&
-      (!Number.isFinite(Number(patch.minimumThreshold)) || Number(patch.minimumThreshold) < 0)
-    ) {
-      return res.status(400).json({ error: 'Minimum threshold cannot be negative.' });
-    }
+    const nextReservedQty =
+      patch.reservedQuantity !== undefined
+        ? parseFiniteNumber(patch.reservedQuantity, 'Reserved quantity', { min: 0, max: 1_000_000_000 })
+        : Number(existing.reserved_quantity) || 0;
+    const nextReorderLevel =
+      patchReorder !== undefined
+        ? parseFiniteNumber(patchReorder, 'Reorder level', { min: 0, max: 1_000_000_000 })
+        : Number(existing.reorder_level) || 0;
+    const nextMinThreshold =
+      patch.minimumThreshold !== undefined
+        ? parseFiniteNumber(patch.minimumThreshold, 'Minimum threshold', { min: 0, max: 1_000_000_000 })
+        : Number(existing.minimum_threshold) || 0;
+    const nextReorderQty =
+      patch.reorderQuantity !== undefined
+        ? parseFiniteNumber(patch.reorderQuantity, 'Reorder quantity', { min: 0, max: 1_000_000_000 })
+        : Number(existing.reorder_quantity) || 0;
+    const nextUnitCost =
+      patch.unitCost !== undefined
+        ? parseFiniteNumber(patch.unitCost, 'Unit cost', { min: 0, max: 1_000_000_000 })
+        : Number(existing.unit_cost) || 0;
 
     let nextSku = String(existing.sku);
     if (patch.sku !== undefined) {
@@ -671,37 +694,27 @@ inventoryRouter.patch(
       WHERE id = ?
     `).run(
       nextSku,
-      patch.barcode !== undefined ? String(patch.barcode).trim() : String(existing.barcode || ''),
-      patch.name !== undefined ? String(patch.name).trim() : String(existing.name),
+      patch.barcode !== undefined ? String(patch.barcode).trim().slice(0, 120) : String(existing.barcode || ''),
+      patch.name !== undefined ? String(patch.name).trim().slice(0, 160) : String(existing.name),
       patch.categoryId !== undefined
-        ? String(patch.categoryId).trim()
+        ? String(patch.categoryId).trim().slice(0, 80)
         : String(existing.category_id || ''),
-      patch.category !== undefined ? String(patch.category).trim() : String(existing.category),
+      patch.category !== undefined ? String(patch.category).trim().slice(0, 80) : String(existing.category),
       patch.itemType === 'finished_product' || patch.itemType === 'consumable'
         ? patch.itemType
         : String(existing.item_type),
-      patch.unit !== undefined ? String(patch.unit).trim() : String(existing.unit),
-      patch.reservedQuantity !== undefined
-        ? Math.max(0, Number(patch.reservedQuantity) || 0)
-        : Number(existing.reserved_quantity) || 0,
-      patchReorder !== undefined
-        ? Math.max(0, Number(patchReorder) || 0)
-        : Number(existing.reorder_level) || 0,
-      patch.minimumThreshold !== undefined
-        ? Math.max(0, Number(patch.minimumThreshold) || 0)
-        : Number(existing.minimum_threshold) || 0,
-      patch.reorderQuantity !== undefined
-        ? Math.max(0, Number(patch.reorderQuantity) || 0)
-        : Number(existing.reorder_quantity) || 0,
-      patch.unitCost !== undefined
-        ? Math.max(0, Number(patch.unitCost) || 0)
-        : Number(existing.unit_cost) || 0,
+      patch.unit !== undefined ? String(patch.unit).trim().slice(0, 40) : String(existing.unit),
+      nextReservedQty,
+      nextReorderLevel,
+      nextMinThreshold,
+      nextReorderQty,
+      nextUnitCost,
       nextSupplier,
       nextSupplierContact,
       nextSupplierSku,
       nextLeadTime,
       patch.storageLocation !== undefined
-        ? String(patch.storageLocation).trim()
+        ? String(patch.storageLocation).trim().slice(0, 120)
         : String(existing.storage_location || ''),
       now,
       id,
@@ -713,7 +726,7 @@ inventoryRouter.patch(
       actorId: req.authUser!.id,
       actorName: req.authUser!.fullName,
     }).catch(() => undefined);
-    res.json(mapInventoryItemRow(updated));
+    return res.json(mapInventoryItemRow(updated));
   },
 );
 
@@ -744,7 +757,7 @@ inventoryRouter.delete(
     });
     run();
 
-    res.json({ ok: true, id });
+    return res.json({ ok: true, id });
   },
 );
 

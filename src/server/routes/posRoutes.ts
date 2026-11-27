@@ -3,10 +3,18 @@ import { db, writeAuditLog } from '../db.ts';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../auth.ts';
 import { evaluateAndDispatchCriticalAlerts } from '../criticalAlertService.ts';
 import {
+  HttpError,
+  optionalString,
+  parseFiniteNumber,
+  requireNonEmptyString,
+  requirePlainObject,
+} from '../httpUtils.ts';
+import {
   genId,
   mapPrintJobRow,
   mapTransactionRow,
   parseJsonSafe,
+  safeFinite,
 } from '../mappers.ts';
 import type {
   CartItem,
@@ -18,27 +26,64 @@ import type {
 
 export const posRouter = express.Router();
 
+const ALLOWED_TRANSACTION_TYPES = new Set(['sale', 'quotation', 'held']);
+const ALLOWED_PAYMENT_STATUSES = new Set(['paid', 'partial', 'unpaid', 'voided', 'refunded']);
+
 export function applyTransactionCreation(
   payload: Transaction,
   actorId: string,
   actorName: string,
 ): { transaction: Transaction; duplicate: boolean } {
+  if (!payload || typeof payload !== 'object') {
+    throw new HttpError(400, 'Transaction payload is required.');
+  }
+  const clientMutationId = requireNonEmptyString(payload.clientMutationId, 'clientMutationId', 120);
+  if (!ALLOWED_TRANSACTION_TYPES.has(payload.type)) {
+    throw new HttpError(400, 'Invalid transaction type.');
+  }
+  if (!ALLOWED_PAYMENT_STATUSES.has(payload.paymentStatus)) {
+    throw new HttpError(400, 'Invalid payment status.');
+  }
+  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+    throw new HttpError(400, 'At least one transaction line item is required.');
+  }
+
   const existing = db
     .prepare('SELECT * FROM transactions WHERE client_mutation_id = ?')
-    .get(payload.clientMutationId) as Record<string, unknown> | undefined;
+    .get(clientMutationId) as Record<string, unknown> | undefined;
 
   if (existing) {
     return { transaction: mapTransactionRow(existing), duplicate: true };
   }
 
-  const txId = payload.id || genId('txn');
+  const subtotal = parseFiniteNumber(payload.subtotal, 'Subtotal', { min: 0, fallback: 0 });
+  const itemDiscountsTotal = parseFiniteNumber(payload.itemDiscountsTotal, 'Item discounts total', {
+    min: 0,
+    fallback: 0,
+  });
+  const orderDiscountValue = parseFiniteNumber(payload.orderDiscountValue, 'Order discount value', {
+    min: 0,
+    fallback: 0,
+  });
+  const orderDiscountAmount = parseFiniteNumber(payload.orderDiscountAmount, 'Order discount amount', {
+    min: 0,
+    fallback: 0,
+  });
+  const taxAmount = parseFiniteNumber(payload.taxAmount, 'Tax amount', { min: 0, fallback: 0 });
+  const totalAmount = parseFiniteNumber(payload.totalAmount, 'Total amount', { min: 0, fallback: 0 });
+  const amountPaid = parseFiniteNumber(payload.amountPaid, 'Amount paid', { min: 0, fallback: 0 });
+  const changeAmount = parseFiniteNumber(payload.changeAmount, 'Change amount', { min: 0, fallback: 0 });
+  const balanceDue = parseFiniteNumber(payload.balanceDue, 'Balance due', { min: 0, fallback: 0 });
+
+  const txId = (typeof payload.id === 'string' && payload.id.trim()) || genId('txn');
   const receiptNumber =
-    payload.receiptNumber ||
+    (typeof payload.receiptNumber === 'string' && payload.receiptNumber.trim()) ||
     `${payload.type === 'quotation' ? 'QT' : payload.type === 'held' ? 'HLD' : 'OR'}-${new Date()
       .toISOString()
       .slice(2, 10)
       .replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
-  const now = payload.createdAt || new Date().toISOString();
+  const now = (typeof payload.createdAt === 'string' && payload.createdAt.trim()) || new Date().toISOString();
+  const safePayments = Array.isArray(payload.payments) ? payload.payments : [];
 
   const runAtomic = db.transaction(() => {
     db.prepare(`
@@ -51,38 +96,43 @@ export function applyTransactionCreation(
     `).run(
       txId,
       receiptNumber,
-      payload.clientMutationId,
+      clientMutationId,
       payload.type,
       payload.customerId || null,
-      payload.customerName || 'Walk-in Customer',
+      optionalString(payload.customerName, 160, 'Walk-in Customer') || 'Walk-in Customer',
       payload.cashierId || actorId,
-      payload.cashierName || actorName,
+      optionalString(payload.cashierName, 120, actorName) || actorName,
       payload.shiftId || null,
-      JSON.stringify(payload.items || []),
-      Number(payload.subtotal) || 0,
-      Number(payload.itemDiscountsTotal) || 0,
+      JSON.stringify(payload.items),
+      subtotal,
+      itemDiscountsTotal,
       payload.orderDiscountType || 'none',
-      Number(payload.orderDiscountValue) || 0,
-      Number(payload.orderDiscountAmount) || 0,
-      Number(payload.taxAmount) || 0,
-      Number(payload.totalAmount) || 0,
-      Number(payload.amountPaid) || 0,
-      Number(payload.changeAmount) || 0,
-      Number(payload.balanceDue) || 0,
+      orderDiscountValue,
+      orderDiscountAmount,
+      taxAmount,
+      totalAmount,
+      amountPaid,
+      changeAmount,
+      balanceDue,
       payload.paymentStatus,
-      JSON.stringify(payload.payments || []),
-      payload.notes || '',
+      JSON.stringify(safePayments),
+      optionalString(payload.notes, 800, ''),
       now,
     );
 
     if (payload.type === 'sale') {
-      const items = (payload.items || []) as CartItem[];
+      const items = payload.items as CartItem[];
 
       const deductedInventoryIds = new Set<string>();
       for (const item of items) {
-        for (const binding of item.consumables || []) {
-          const deductQty = Number((binding.quantityPerUnit * item.effectiveQuantity).toFixed(2));
-          if (deductQty <= 0) continue;
+        if (!item) continue;
+        const effectiveQty = Math.max(0, safeFinite(item.effectiveQuantity, 0));
+        const consumables = Array.isArray(item.consumables) ? item.consumables : [];
+        for (const binding of consumables) {
+          if (!binding || typeof binding.inventoryItemId !== 'string') continue;
+          const qtyPerUnit = Math.max(0, safeFinite(binding.quantityPerUnit, 0));
+          const deductQty = Number((qtyPerUnit * effectiveQty).toFixed(2));
+          if (!Number.isFinite(deductQty) || deductQty <= 0) continue;
           const invRow = db
             .prepare('SELECT id, name, quantity_on_hand, unit_cost FROM inventory_items WHERE id = ?')
             .get(binding.inventoryItemId) as
@@ -90,7 +140,7 @@ export function applyTransactionCreation(
             | undefined;
           if (invRow) {
             deductedInventoryIds.add(invRow.id);
-            const qtyBefore = Number(invRow.quantity_on_hand) || 0;
+            const qtyBefore = safeFinite(invRow.quantity_on_hand, 0);
             const nextQty = Math.max(0, Number((qtyBefore - deductQty).toFixed(2)));
             db.prepare('UPDATE inventory_items SET quantity_on_hand = ?, updated_at = ? WHERE id = ?').run(
               nextQty,
@@ -178,29 +228,24 @@ export function applyTransactionCreation(
       }
 
       if (payload.customerId) {
-        const pointsEarned = Math.floor(Number(payload.amountPaid) / 10);
+        const pointsEarned = Math.floor(amountPaid / 10);
         db.prepare(`
           UPDATE customers
           SET total_spent = total_spent + ?,
               loyalty_points = loyalty_points + ?,
               outstanding_balance = outstanding_balance + ?
           WHERE id = ?
-        `).run(
-          Number(payload.amountPaid) || 0,
-          pointsEarned,
-          Number(payload.balanceDue) || 0,
-          payload.customerId,
-        );
+        `).run(amountPaid, pointsEarned, balanceDue, payload.customerId);
       }
 
       if (payload.shiftId) {
-        const cashPaid = (payload.payments || [])
-          .filter((p) => p.methodType === 'cash')
-          .reduce((s, p) => s + Number(p.amount), 0);
-        const netCashAdded = Math.max(0, cashPaid - (Number(payload.changeAmount) || 0));
-        const electronicPaid = (payload.payments || [])
-          .filter((p) => p.methodType !== 'cash' && p.methodType !== 'credit_balance')
-          .reduce((s, p) => s + Number(p.amount), 0);
+        const cashPaid = safePayments
+          .filter((p) => p && p.methodType === 'cash')
+          .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0);
+        const netCashAdded = Math.max(0, cashPaid - changeAmount);
+        const electronicPaid = safePayments
+          .filter((p) => p && p.methodType !== 'cash' && p.methodType !== 'credit_balance')
+          .reduce((s, p) => s + Math.max(0, safeFinite(p.amount, 0)), 0);
 
         db.prepare(`
           UPDATE cashier_shifts
@@ -218,7 +263,7 @@ export function applyTransactionCreation(
       `TXN_${payload.type.toUpperCase()}`,
       'transaction',
       txId,
-      `${receiptNumber} · ${payload.customerName} · ${payload.totalAmount}`,
+      `${receiptNumber} · ${optionalString(payload.customerName, 120, 'Walk-in Customer')} · ${totalAmount}`,
     );
   });
 
@@ -228,12 +273,12 @@ export function applyTransactionCreation(
 }
 
 posRouter.post('/transactions', requireAuth, (req: AuthenticatedRequest, res) => {
-  const payload = req.body as Transaction;
-  if (!payload || !payload.clientMutationId || !Array.isArray(payload.items) || payload.items.length === 0) {
+  const payload = requirePlainObject(req.body, 'Transaction') as unknown as Transaction;
+  if (!payload.clientMutationId || !Array.isArray(payload.items) || payload.items.length === 0) {
     return res.status(400).json({ error: 'Transaction items and clientMutationId are required.' });
   }
   const result = applyTransactionCreation(payload, req.authUser!.id, req.authUser!.fullName);
-  res.status(result.duplicate ? 200 : 201).json(result);
+  return res.status(result.duplicate ? 200 : 201).json(result);
 });
 
 posRouter.delete('/transactions/:id/held', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -269,7 +314,7 @@ posRouter.post(
       `Voided ${existing.receipt_number}: ${reason}`,
     );
     const updated = db.prepare('SELECT * FROM transactions WHERE id = ?').get(id) as Record<string, unknown>;
-    res.json(mapTransactionRow(updated));
+    return res.json(mapTransactionRow(updated));
   },
 );
 
@@ -309,25 +354,24 @@ posRouter.post(
       `Refunded ${existing.receipt_number}: ${reason}`,
     );
     const updated = db.prepare('SELECT * FROM transactions WHERE id = ?').get(id) as Record<string, unknown>;
-    res.json(mapTransactionRow(updated));
+    return res.json(mapTransactionRow(updated));
   },
 );
 
 posRouter.post('/print-jobs', requireAuth, (req: AuthenticatedRequest, res) => {
-  const j = req.body as Partial<PrintJob>;
-  if (!j.title || !j.customerName) {
-    return res.status(400).json({ error: 'Job title and customer name are required.' });
-  }
+  const j = requirePlainObject(req.body, 'Print job') as Partial<PrintJob>;
+  const title = requireNonEmptyString(j.title, 'Job title', 160);
+  const customerName = requireNonEmptyString(j.customerName, 'Customer name', 160);
   const id = genId('job');
   const joNumber =
-    j.jobOrderNumber ||
+    (typeof j.jobOrderNumber === 'string' && j.jobOrderNumber.trim()) ||
     `JO-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(
       100 + Math.random() * 900,
     )}`;
   const now = new Date().toISOString();
-  const total = Number(j.totalAmount) || 0;
-  const deposit = Number(j.depositAmount) || 0;
-  const remaining = Math.max(0, total - deposit);
+  const total = parseFiniteNumber(j.totalAmount, 'Total amount', { min: 0, fallback: 0 });
+  const deposit = parseFiniteNumber(j.depositAmount, 'Deposit amount', { min: 0, fallback: 0 });
+  const remaining = Math.max(0, Number((total - deposit).toFixed(2)));
   const paymentStatus = deposit >= total && total > 0 ? 'paid' : deposit > 0 ? 'partial' : 'unpaid';
 
   db.prepare(`
@@ -342,13 +386,13 @@ posRouter.post('/print-jobs', requireAuth, (req: AuthenticatedRequest, res) => {
     joNumber,
     j.transactionId || null,
     j.customerId || null,
-    j.customerName,
-    j.customerPhone || '',
-    j.title,
-    j.specifications || '',
-    JSON.stringify(j.attachmentNames || []),
-    j.instructions || '',
-    j.assignedOperator || req.authUser!.fullName,
+    customerName,
+    optionalString(j.customerPhone, 60),
+    title,
+    optionalString(j.specifications, 800),
+    JSON.stringify(Array.isArray(j.attachmentNames) ? j.attachmentNames : []),
+    optionalString(j.instructions, 800),
+    optionalString(j.assignedOperator, 120, req.authUser!.fullName) || req.authUser!.fullName,
     j.productionStatus || 'pending',
     j.paymentStatus || paymentStatus,
     total,
@@ -368,7 +412,7 @@ posRouter.post('/print-jobs', requireAuth, (req: AuthenticatedRequest, res) => {
     now,
   );
   const saved = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(id) as Record<string, unknown>;
-  res.status(201).json(mapPrintJobRow(saved));
+  return res.status(201).json(mapPrintJobRow(saved));
 });
 
 posRouter.patch('/print-jobs/:id', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -378,6 +422,7 @@ posRouter.patch('/print-jobs/:id', requireAuth, (req: AuthenticatedRequest, res)
     | undefined;
   if (!existing) return res.status(404).json({ error: 'Print job not found.' });
 
+  const body = requirePlainObject(req.body, 'Print job update');
   const {
     productionStatus,
     paymentStatus,
@@ -385,22 +430,25 @@ posRouter.patch('/print-jobs/:id', requireAuth, (req: AuthenticatedRequest, res)
     instructions,
     depositAmount,
     note,
-  } = req.body || {};
+  } = body;
 
   const now = new Date().toISOString();
   const history = parseJsonSafe<Array<Record<string, unknown>>>(existing.history_json as string, []);
-  if (productionStatus && productionStatus !== existing.production_status) {
+  if (typeof productionStatus === 'string' && productionStatus && productionStatus !== existing.production_status) {
     history.push({
       status: productionStatus,
       changedBy: req.authUser!.fullName,
-      note: note || `Moved to ${String(productionStatus).replace(/_/g, ' ')}`,
+      note: optionalString(note, 300) || `Moved to ${productionStatus.replace(/_/g, ' ')}`,
       timestamp: now,
     });
   }
 
-  const total = Number(existing.total_amount) || 0;
-  const nextDeposit = depositAmount !== undefined ? Number(depositAmount) : Number(existing.deposit_amount);
-  const nextRemaining = Math.max(0, total - nextDeposit);
+  const total = safeFinite(existing.total_amount, 0);
+  const nextDeposit =
+    depositAmount !== undefined
+      ? parseFiniteNumber(depositAmount, 'Deposit amount', { min: 0, max: 1_000_000_000 })
+      : safeFinite(existing.deposit_amount, 0);
+  const nextRemaining = Math.max(0, Number((total - nextDeposit).toFixed(2)));
 
   db.prepare(`
     UPDATE print_jobs
@@ -420,16 +468,31 @@ posRouter.patch('/print-jobs/:id', requireAuth, (req: AuthenticatedRequest, res)
   );
 
   const updated = db.prepare('SELECT * FROM print_jobs WHERE id = ?').get(id) as Record<string, unknown>;
-  res.json(mapPrintJobRow(updated));
+  return res.json(mapPrintJobRow(updated));
 });
 
-posRouter.post('/customers', requireAuth, (_req: AuthenticatedRequest, res) => {
-  const c = _req.body as Partial<Customer>;
-  if (!c.name || !String(c.name).trim()) {
-    return res.status(400).json({ error: 'Customer name is required.' });
-  }
+posRouter.post('/customers', requireAuth, (req: AuthenticatedRequest, res) => {
+  const c = requirePlainObject(req.body, 'Customer') as Partial<Customer>;
+  const name = requireNonEmptyString(c.name, 'Customer name', 140);
+  const discountPercent = parseFiniteNumber(c.discountPercent, 'Discount percent', {
+    min: 0,
+    max: 100,
+    fallback: 0,
+  });
+  const loyaltyPoints = parseFiniteNumber(c.loyaltyPoints, 'Loyalty points', {
+    min: 0,
+    max: 1_000_000,
+    integer: true,
+    fallback: 0,
+  });
   const id = genId('cust');
   const now = new Date().toISOString();
+  const phone = optionalString(c.phone, 60);
+  const email = optionalString(c.email, 140);
+  const address = optionalString(c.address, 240);
+  const group = c.group || 'regular';
+  const notes = optionalString(c.notes, 600);
+
   db.prepare(`
     INSERT INTO customers (
       id, name, phone, email, address, customer_group, discount_percent, loyalty_points,
@@ -437,28 +500,28 @@ posRouter.post('/customers', requireAuth, (_req: AuthenticatedRequest, res) => {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?)
   `).run(
     id,
-    String(c.name).trim(),
-    c.phone || '',
-    c.email || '',
-    c.address || '',
-    c.group || 'regular',
-    Number(c.discountPercent) || 0,
-    Number(c.loyaltyPoints) || 0,
-    c.notes || '',
+    name,
+    phone,
+    email,
+    address,
+    group,
+    discountPercent,
+    loyaltyPoints,
+    notes,
     now,
   );
-  res.status(201).json({
+  return res.status(201).json({
     id,
-    name: String(c.name).trim(),
-    phone: c.phone || '',
-    email: c.email || '',
-    address: c.address || '',
-    group: c.group || 'regular',
-    discountPercent: Number(c.discountPercent) || 0,
-    loyaltyPoints: Number(c.loyaltyPoints) || 0,
+    name,
+    phone,
+    email,
+    address,
+    group,
+    discountPercent,
+    loyaltyPoints,
     outstandingBalance: 0,
     totalSpent: 0,
-    notes: c.notes || '',
+    notes,
     isDemo: false,
     createdAt: now,
   });
@@ -466,15 +529,17 @@ posRouter.post('/customers', requireAuth, (_req: AuthenticatedRequest, res) => {
 
 posRouter.post('/customers/:id/pay-balance', requireAuth, (req: AuthenticatedRequest, res) => {
   const id = String(req.params.id);
-  const amount = Number(req.body?.amount) || 0;
-  if (amount <= 0) return res.status(400).json({ error: 'Payment amount must be positive.' });
+  const amount = parseFiniteNumber(req.body?.amount, 'Payment amount', {
+    min: 0.01,
+    max: 1_000_000_000,
+  });
 
   const cust = db.prepare('SELECT * FROM customers WHERE id = ?').get(id) as
     | Record<string, unknown>
     | undefined;
   if (!cust) return res.status(404).json({ error: 'Customer not found.' });
 
-  const currentBal = Number(cust.outstanding_balance) || 0;
+  const currentBal = safeFinite(cust.outstanding_balance, 0);
   const applied = Math.min(currentBal, amount);
   const nextBal = Math.max(0, Number((currentBal - applied).toFixed(2)));
   db.prepare('UPDATE customers SET outstanding_balance = ?, total_spent = total_spent + ? WHERE id = ?').run(
@@ -490,36 +555,38 @@ posRouter.post('/customers/:id/pay-balance', requireAuth, (req: AuthenticatedReq
     id,
     `Collected ${applied} toward balance of ${cust.name}`,
   );
-  res.json({ id, outstandingBalance: nextBal });
+  return res.json({ id, outstandingBalance: nextBal });
 });
 
 posRouter.post('/expenses', requireAuth, (req: AuthenticatedRequest, res) => {
-  const e = req.body as Partial<ExpenseRecord>;
-  if (!e.description || !(Number(e.amount) > 0)) {
-    return res.status(400).json({ error: 'Description and positive amount are required.' });
-  }
+  const e = requirePlainObject(req.body, 'Expense') as Partial<ExpenseRecord>;
+  const description = requireNonEmptyString(e.description, 'Expense description', 300);
+  const amount = parseFiniteNumber(e.amount, 'Expense amount', { min: 0.01, max: 1_000_000_000 });
   const id = genId('exp');
   const now = new Date().toISOString();
-  const expenseDate = e.expenseDate || now.slice(0, 10);
+  const expenseDate = optionalString(e.expenseDate, 32, now.slice(0, 10)) || now.slice(0, 10);
+  const category = e.category || 'other';
+  const vendor = optionalString(e.vendor, 140);
+
   db.prepare(`
     INSERT INTO expenses (id, category, description, amount, vendor, recorded_by, expense_date, is_demo, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
   `).run(
     id,
-    e.category || 'other',
-    e.description,
-    Number(e.amount),
-    e.vendor || '',
+    category,
+    description,
+    amount,
+    vendor,
     req.authUser!.fullName,
     expenseDate,
     now,
   );
-  res.status(201).json({
+  return res.status(201).json({
     id,
-    category: e.category || 'other',
-    description: e.description,
-    amount: Number(e.amount),
-    vendor: e.vendor || '',
+    category,
+    description,
+    amount,
+    vendor,
     recordedBy: req.authUser!.fullName,
     expenseDate,
     isDemo: false,
@@ -538,7 +605,11 @@ posRouter.delete(
 );
 
 posRouter.post('/shifts/start', requireAuth, (req: AuthenticatedRequest, res) => {
-  const openingCash = Number(req.body?.openingCash) || 0;
+  const openingCash = parseFiniteNumber(req.body?.openingCash, 'Opening cash', {
+    min: 0,
+    max: 1_000_000_000,
+    fallback: 0,
+  });
   const openShift = db
     .prepare("SELECT id FROM cashier_shifts WHERE cashier_id = ? AND status = 'open'")
     .get(req.authUser!.id);
@@ -562,7 +633,7 @@ posRouter.post('/shifts/start', requireAuth, (req: AuthenticatedRequest, res) =>
     id,
     `Started shift with opening cash ${openingCash}`,
   );
-  res.status(201).json({
+  return res.status(201).json({
     id,
     cashierId: req.authUser!.id,
     cashierName: req.authUser!.fullName,
@@ -583,11 +654,14 @@ posRouter.post('/shifts/start', requireAuth, (req: AuthenticatedRequest, res) =>
 
 posRouter.post('/shifts/:id/movement', requireAuth, (req: AuthenticatedRequest, res) => {
   const id = String(req.params.id);
-  const { type, amount, reason } = req.body || {};
-  const val = Number(amount) || 0;
-  if (!['cash_in', 'cash_out'].includes(type) || val <= 0 || !reason) {
-    return res.status(400).json({ error: 'Valid movement type, positive amount, and reason required.' });
+  const body = requirePlainObject(req.body, 'Cash movement');
+  const type = body.type;
+  if (type !== 'cash_in' && type !== 'cash_out') {
+    return res.status(400).json({ error: 'Movement type must be cash_in or cash_out.' });
   }
+  const val = parseFiniteNumber(body.amount, 'Amount', { min: 0.01, max: 1_000_000_000 });
+  const reason = requireNonEmptyString(body.reason, 'Movement reason', 300);
+
   const shift = db.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND status = 'open'").get(id) as
     | Record<string, unknown>
     | undefined;
@@ -598,27 +672,27 @@ posRouter.post('/shifts/:id/movement', requireAuth, (req: AuthenticatedRequest, 
     id: genId('cm'),
     type,
     amount: val,
-    reason: String(reason),
+    reason,
     timestamp: new Date().toISOString(),
   });
   const delta = type === 'cash_in' ? val : -val;
-  const expected = Math.max(0, (Number(shift.expected_cash) || 0) + delta);
+  const expected = Math.max(0, Number((safeFinite(shift.expected_cash, 0) + delta).toFixed(2)));
 
   db.prepare('UPDATE cashier_shifts SET cash_movements_json = ?, expected_cash = ? WHERE id = ?').run(
     JSON.stringify(movements),
     expected,
     id,
   );
-  res.json({ id, cashMovements: movements, expectedCash: expected });
+  return res.json({ id, cashMovements: movements, expectedCash: expected });
 });
 
 posRouter.post('/shifts/:id/close', requireAuth, (req: AuthenticatedRequest, res) => {
   const id = String(req.params.id);
-  const actualCash = Number(req.body?.actualCash);
-  const reconciliationNote = String(req.body?.reconciliationNote || '');
-  if (!Number.isFinite(actualCash) || actualCash < 0) {
-    return res.status(400).json({ error: 'Actual cash count is required.' });
-  }
+  const actualCash = parseFiniteNumber(req.body?.actualCash, 'Actual cash count', {
+    min: 0,
+    max: 1_000_000_000,
+  });
+  const reconciliationNote = optionalString(req.body?.reconciliationNote, 500);
   const shift = db.prepare("SELECT * FROM cashier_shifts WHERE id = ? AND status = 'open'").get(id) as
     | Record<string, unknown>
     | undefined;
@@ -642,5 +716,5 @@ posRouter.post('/shifts/:id/close', requireAuth, (req: AuthenticatedRequest, res
     id,
     `Closed shift. Expected ${expected}, Actual ${actualCash}, Discrepancy ${discrepancy}`,
   );
-  res.json({ id, status: 'closed', actualCash, discrepancy, endedAt: now });
+  return res.json({ id, status: 'closed', actualCash, discrepancy, endedAt: now });
 });

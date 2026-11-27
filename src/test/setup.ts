@@ -323,7 +323,7 @@ if (typeof window !== 'undefined') {
   if (!existingCrypto || typeof existingCrypto.randomUUID !== 'function') {
     let uuidSeq = 0;
     const mockCrypto = {
-      ...(existingCrypto || {}),
+      ...existingCrypto,
       getRandomValues:
         existingCrypto?.getRandomValues?.bind(existingCrypto) ??
         (<T extends ArrayBufferView>(arr: T): T => {

@@ -66,4 +66,18 @@ describe('barcodeScannerMatch', () => {
     expect(unmatched.matchedBy).toBeNull();
     expect(unmatched.normalizedCode).toBe('999999999999');
   });
+
+  it('gracefully handles non-string inputs, JSON arrays, and non-finite qty values', () => {
+    const nonString = matchInventoryItemFromScan(null as unknown as string, DEMO_INVENTORY);
+    expect(nonString.item).toBeNull();
+    expect(nonString.normalizedCode).toBe('');
+
+    const jsonArray = parseScannedCodePayload('["MAT-PAP-A4"]');
+    expect(jsonArray.lookupCandidates).toEqual(['["MAT-PAP-A4"]']);
+
+    const badNumbers = parseScannedCodePayload('{"sku":"MAT-PAP-A4","qty":-10,"unitCost":"NaN"}');
+    expect(badNumbers.normalizedCode).toBe('MAT-PAP-A4');
+    expect(badNumbers.suggestedQty).toBeUndefined();
+    expect(badNumbers.suggestedUnitCost).toBeUndefined();
+  });
 });

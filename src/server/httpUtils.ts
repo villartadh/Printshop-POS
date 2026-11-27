@@ -10,6 +10,16 @@ export class HttpError extends Error {
   }
 }
 
+export function requirePlainObject(
+  value: unknown,
+  label = 'Request body',
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new HttpError(400, `${label} must be a valid JSON object.`);
+  }
+  return value as Record<string, unknown>;
+}
+
 export function requireNonEmptyString(
   value: unknown,
   fieldLabel: string,
@@ -41,11 +51,11 @@ export function parseFiniteNumber(
     }
     throw new HttpError(400, `${fieldLabel} must be a valid number.`);
   }
-  const parsed = Number(value);
+  const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(parsed)) {
     throw new HttpError(400, `${fieldLabel} must be a valid number.`);
   }
-  let result = options?.integer ? Math.round(parsed) : parsed;
+  const result = options?.integer ? Math.round(parsed) : parsed;
   if (options?.min !== undefined && result < options.min) {
     throw new HttpError(400, `${fieldLabel} cannot be less than ${options.min}.`);
   }
@@ -74,20 +84,31 @@ export function apiErrorHandler(
     return res.status(err.statusCode).json({ error: err.message });
   }
 
+  const errObj = err && typeof err === 'object' ? (err as Record<string, unknown>) : null;
+  const errType = typeof errObj?.type === 'string' ? errObj.type : '';
+
+  if (errType === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request payload exceeds the maximum allowed size.' });
+  }
+
   if (
     err instanceof SyntaxError &&
-    ('body' in err || (err as { type?: string }).type === 'entity.parse.failed')
+    (errObj !== null && ('body' in errObj || errType === 'entity.parse.failed'))
   ) {
     return res.status(400).json({ error: 'Malformed JSON request payload.' });
   }
 
-  const sqliteCode = (err as { code?: string })?.code;
-  if (typeof sqliteCode === 'string' && sqliteCode.startsWith('SQLITE_CONSTRAINT')) {
+  const sqliteCode = typeof errObj?.code === 'string' ? errObj.code : '';
+  if (sqliteCode.startsWith('SQLITE_CONSTRAINT')) {
     return res.status(409).json({ error: 'A conflicting record already exists.' });
   }
 
-  const statusCode = (err as { statusCode?: number; status?: number })?.statusCode
-    ?? (err as { status?: number })?.status;
+  const statusCode =
+    typeof errObj?.statusCode === 'number'
+      ? errObj.statusCode
+      : typeof errObj?.status === 'number'
+        ? errObj.status
+        : undefined;
   if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
     const message = err instanceof Error ? err.message : 'Invalid request.';
     return res.status(statusCode).json({ error: message });

@@ -105,4 +105,28 @@ describe('supplierCsvMapper', () => {
       unitCost: 0.5,
     });
   });
+
+  it('safely handles null CSV input, malformed cells, and strict numeric parsing', () => {
+    expect(parseCsvDocument(null as unknown as string)).toEqual({
+      headers: [],
+      rows: [],
+      delimiter: ',',
+    });
+
+    const columnMap = detectSupplierCsvColumns([
+      'SKU',
+      'Supplier Name',
+      'Supplier Contact',
+      'Supplier SKU',
+      'Lead Time Days',
+      'Unit Cost',
+    ]);
+    const mapped = autoMapSupplierCsvRows({
+      rows: [['MAT-PAP-A4', 'PaperOne', '', '', '3abc', '-15.50']],
+      columnMap,
+      inventory: DEMO_INVENTORY,
+    });
+    expect(mapped[0].leadTimeDays).toBeUndefined();
+    expect(mapped[0].unitCost).toBeUndefined();
+  });
 });

@@ -58,7 +58,10 @@ function detectDelimiter(firstLine: string): ',' | ';' | '\t' {
 }
 
 export function parseCsvDocument(rawText: string): ParsedCsvDocument {
-  const cleaned = (rawText || '').replace(/^\uFEFF/, '');
+  if (typeof rawText !== 'string' || !rawText) {
+    return { headers: [], rows: [], delimiter: ',' };
+  }
+  const cleaned = rawText.replace(/^\uFEFF/, '');
   const firstBreak = cleaned.search(/\r?\n/);
   const sampleHeader = firstBreak >= 0 ? cleaned.slice(0, firstBreak) : cleaned;
   const delimiter = detectDelimiter(sampleHeader);
@@ -128,14 +131,15 @@ export function parseCsvDocument(rawText: string): ParsedCsvDocument {
 }
 
 function normalizeHeader(header: string): string {
-  return header
+  return (typeof header === 'string' ? header : '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
 
 function findHeaderIndex(headers: string[], candidates: string[]): number {
-  const normalizedHeaders = headers.map(normalizeHeader);
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  const normalizedHeaders = safeHeaders.map(normalizeHeader);
   for (const candidate of candidates) {
     const exactIdx = normalizedHeaders.indexOf(candidate);
     if (exactIdx !== -1) return exactIdx;
@@ -230,19 +234,29 @@ export function normalizeSupplierNameKey(name: string): string {
   return (stripped.length > 0 ? stripped : tokens).join(' ');
 }
 
-function parseOptionalNonNegativeInt(raw: string): number | undefined {
+function normalizeStrictDecimalString(raw: string): string | null {
+  if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const num = Number(trimmed.replace(/[^0-9.-]/g, ''));
+  if (!trimmed) return null;
+  // Strip currency prefixes/symbols and thousands commas only, preserving invalid letters/signs
+  const stripped = trimmed.replace(/^(?:PHP|USD|EUR)\s+/i, '').replace(/[$₱€,\s]/g, '');
+  if (!/^\d+(?:\.\d+)?$/.test(stripped)) return null;
+  return stripped;
+}
+
+function parseOptionalNonNegativeInt(raw: string): number | undefined {
+  const normalized = normalizeStrictDecimalString(raw);
+  if (!normalized) return undefined;
+  const num = Number(normalized);
   if (!Number.isFinite(num) || num < 0) return undefined;
   return Math.min(365, Math.round(num));
 }
 
 function parseOptionalNonNegativeCost(raw: string): number | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-  const num = Number(trimmed.replace(/[^0-9.-]/g, ''));
-  if (!Number.isFinite(num) || num < 0) return undefined;
+  const normalized = normalizeStrictDecimalString(raw);
+  if (!normalized) return undefined;
+  const num = Number(normalized);
+  if (!Number.isFinite(num) || num < 0 || num > 10_000_000) return undefined;
   return Number(num.toFixed(2));
 }
 
@@ -257,13 +271,15 @@ export function autoMapSupplierCsvRows({
   inventory: InventoryItem[];
   manualItemIdByRowIndex?: Record<number, string>;
 }): MappedSupplierCsvRow[] {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeInventory = Array.isArray(inventory) ? inventory.filter(Boolean) : [];
   const itemById = new Map<string, InventoryItem>();
   const itemByExactSku = new Map<string, InventoryItem>();
   const itemsByVendorSku = new Map<string, InventoryItem[]>();
   const itemsByExactSupplier = new Map<string, InventoryItem[]>();
   const itemsByNormalizedSupplier = new Map<string, InventoryItem[]>();
 
-  for (const item of inventory) {
+  for (const item of safeInventory) {
     itemById.set(item.id, item);
 
     const skuKey = (item.sku || '').trim().toUpperCase();
@@ -294,8 +310,12 @@ export function autoMapSupplierCsvRows({
     }
   }
 
-  return rows.map((row, rowIndex) => {
-    const cell = (idx: number) => (idx >= 0 && idx < row.length ? row[idx].trim() : '');
+  return safeRows.map((row, rowIndex) => {
+    const safeRow = Array.isArray(row) ? row : [];
+    const cell = (idx: number) =>
+      idx >= 0 && idx < safeRow.length && typeof safeRow[idx] === 'string'
+        ? safeRow[idx].trim()
+        : '';
 
     const sku = cell(columnMap.sku);
     const supplierName = cell(columnMap.supplierName);
@@ -393,9 +413,15 @@ export function autoMapSupplierCsvRows({
 
     if (supNormKey && supNormKey.length >= 4) {
       const partialMatches: InventoryItem[] = [];
+      const seenItemIds = new Set<string>();
       for (const [key, list] of itemsByNormalizedSupplier.entries()) {
         if (key.includes(supNormKey) || supNormKey.includes(key)) {
-          partialMatches.push(...list);
+          for (const candidate of list) {
+            if (!seenItemIds.has(candidate.id)) {
+              seenItemIds.add(candidate.id);
+              partialMatches.push(candidate);
+            }
+          }
         }
       }
       if (partialMatches.length > 0) {

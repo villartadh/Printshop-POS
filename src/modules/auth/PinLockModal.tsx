@@ -21,24 +21,27 @@ export const PinLockModal: React.FC = () => {
   );
   const [pin, setPin] = useState('');
   const [password, setPassword] = useState('');
-  const [usePassword, setUsePassword] = useState(pinUsers.length === 0);
+  const [usePassword, setUsePassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!isLocked || !session) return null;
+
+  const showPasswordForm = usePassword || pinUsers.length === 0;
 
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      if (usePassword) {
+      if (showPasswordForm) {
         await loginWithPassword(session.user.username, password);
       } else {
         await loginWithPin(selectedUserId || session.user.id, pin);
       }
       setPin('');
       setPassword('');
+      setUsePassword(false);
       setIsLocked(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Invalid credentials');
@@ -65,7 +68,7 @@ export const PinLockModal: React.FC = () => {
               onClick={() => setUsePassword((v) => !v)}
               className="text-xs font-medium text-[var(--pos-primary)] hover:underline cursor-pointer"
             >
-              {usePassword ? 'Use PIN instead' : 'Use password'}
+              {showPasswordForm ? 'Use PIN instead' : 'Use password'}
             </button>
           )}
         </div>
@@ -87,7 +90,7 @@ export const PinLockModal: React.FC = () => {
           </div>
         )}
 
-        {!usePassword && pinUsers.length > 0 ? (
+        {!showPasswordForm ? (
           <>
             <Select
               label="Cashier / Operator"

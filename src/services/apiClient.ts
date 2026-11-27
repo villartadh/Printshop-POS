@@ -1,9 +1,10 @@
 import { appendDiagnosticLog } from './offlineDb.ts';
 
 let memoryAccessToken = '';
+const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 
 export function setMemoryToken(token: string) {
-  memoryAccessToken = token;
+  memoryAccessToken = typeof token === 'string' ? token : '';
 }
 
 export function getMemoryToken(): string {
@@ -31,22 +32,80 @@ export function getDeviceDescriptor(): { deviceId: string; deviceName: string } 
   return { deviceId, deviceName };
 }
 
+function normalizeHeaders(headersInit?: HeadersInit): Record<string, string> {
+  if (!headersInit) return {};
+  if (headersInit instanceof Headers) {
+    const out: Record<string, string> = {};
+    headersInit.forEach((value, key) => {
+      out[key] = value;
+    });
+    return out;
+  }
+  if (Array.isArray(headersInit)) {
+    return Object.fromEntries(headersInit);
+  }
+  return { ...headersInit };
+}
+
+async function fetchWithTimeout(
+  path: string,
+  options: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new Error('Request URL path is required.');
+  }
+
+  const useOwnAbort = !options.signal && typeof AbortController !== 'undefined';
+  const controller = useOwnAbort ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+
+  try {
+    return await fetch(path, {
+      ...options,
+      signal: options.signal ?? controller?.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Request timed out. Check your connection and try again.');
+    }
+    throw new Error('Network error: unable to reach the server.');
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 export async function apiRequest<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...((options.headers as Record<string, string>) || {}),
+    ...normalizeHeaders(options.headers),
   };
   if (memoryAccessToken) {
     headers.Authorization = `Bearer ${memoryAccessToken}`;
   }
 
-  const res = await fetch(path, {
-    ...options,
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(path, {
+      ...options,
+      headers,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Network error';
+    void appendDiagnosticLog({
+      level: 'error',
+      category: 'sync',
+      message: `${options.method || 'GET'} ${path}: ${message}`,
+    });
+    throw err;
+  }
 
   const text = await res.text();
   let data: unknown = {};
@@ -59,9 +118,10 @@ export async function apiRequest<T>(
   }
 
   if (!res.ok) {
+    const errObj = data && typeof data === 'object' ? (data as { error?: string; message?: string }) : null;
     const errMsg =
-      (data as { error?: string; message?: string })?.error ||
-      (data as { error?: string; message?: string })?.message ||
+      errObj?.error ||
+      errObj?.message ||
       `Request failed (${res.status})`;
     void appendDiagnosticLog({
       level: res.status >= 500 ? 'error' : 'warn',
@@ -79,7 +139,7 @@ export async function fetchAuthorizedBlob(path: string): Promise<Blob> {
   if (memoryAccessToken) {
     headers.Authorization = `Bearer ${memoryAccessToken}`;
   }
-  const res = await fetch(path, { headers });
+  const res = await fetchWithTimeout(path, { headers });
   if (!res.ok) {
     let message = `Failed to download file (${res.status})`;
     try {

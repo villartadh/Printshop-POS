@@ -8,7 +8,13 @@ import {
   sanitizeUser,
   verifySecret,
   type AuthenticatedRequest,
+  type UserRow,
 } from '../auth.ts';
+import {
+  optionalString,
+  requireNonEmptyString,
+  requirePlainObject,
+} from '../httpUtils.ts';
 import { genId } from '../mappers.ts';
 
 export const authRouter = express.Router();
@@ -36,13 +42,17 @@ authRouter.get('/auth/status', (_req, res) => {
 });
 
 authRouter.post('/auth/setup-admin', (req, res) => {
-  const { username, fullName, email, password, pin, deviceId, deviceName } = req.body || {};
-  if (!username || !fullName || !password || String(password).length < 6) {
+  const body = requirePlainObject(req.body, 'Setup request');
+  const username = requireNonEmptyString(body.username, 'Username', 60).toLowerCase();
+  const fullName = requireNonEmptyString(body.fullName, 'Full name', 120);
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (password.length < 6 || password.length > 200) {
     return res
       .status(400)
       .json({ error: 'Username, full name, and a password of at least 6 characters are required.' });
   }
-  if (pin && !/^\d{4,6}$/.test(String(pin))) {
+  const pin = body.pin !== undefined && body.pin !== null && body.pin !== '' ? String(body.pin).trim() : '';
+  if (pin && !/^\d{4,6}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be 4 to 6 digits.' });
   }
 
@@ -55,72 +65,76 @@ authRouter.post('/auth/setup-admin', (req, res) => {
 
   const userId = genId('usr');
   const now = new Date().toISOString();
-  const pwHash = hashSecret(String(password));
-  const pinHash = pin ? hashSecret(String(pin)) : '';
+  const pwHash = hashSecret(password);
+  const pinHash = pin ? hashSecret(pin) : '';
 
   db.prepare(`
     INSERT INTO users (id, username, full_name, email, role, password_hash, pin_hash, is_active, preferred_landing_module, created_at)
     VALUES (?, ?, ?, ?, 'admin', ?, ?, 1, 'pos', ?)
   `).run(
     userId,
-    String(username).trim().toLowerCase(),
-    String(fullName).trim(),
-    String(email || '').trim(),
+    username,
+    fullName,
+    optionalString(body.email, 140),
     pwHash,
     pinHash,
     now,
   );
 
-  const createdUser = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as never;
+  const createdUser = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as UserRow;
   const session = createSessionForUser(
     createdUser,
-    String(deviceId || 'web-browser'),
-    String(deviceName || 'Web Terminal'),
+    optionalString(body.deviceId, 120, 'web-browser') || 'web-browser',
+    optionalString(body.deviceName, 120, 'Web Terminal') || 'Web Terminal',
   );
-  res.status(201).json(session);
+  return res.status(201).json(session);
 });
 
 authRouter.post('/auth/login', (req, res) => {
-  const { username, password, deviceId, deviceName } = req.body || {};
-  if (!username || !password) {
+  const body = requirePlainObject(req.body, 'Login request');
+  if (typeof body.username !== 'string' || typeof body.password !== 'string' || !body.username.trim() || !body.password) {
     return res.status(400).json({ error: 'Username and password are required.' });
   }
-  const normalized = String(username).trim().toLowerCase();
+  const normalized = body.username.trim().slice(0, 140).toLowerCase();
   const userRow = db
     .prepare('SELECT * FROM users WHERE (LOWER(username) = ? OR LOWER(email) = ?) AND is_active = 1')
-    .get(normalized, normalized) as { password_hash: string } | undefined;
+    .get(normalized, normalized) as UserRow | undefined;
 
-  if (!userRow || !verifySecret(String(password), userRow.password_hash)) {
+  if (!userRow || !verifySecret(body.password, userRow.password_hash)) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
 
   const session = createSessionForUser(
-    userRow as never,
-    String(deviceId || 'web-browser'),
-    String(deviceName || 'Web Terminal'),
+    userRow,
+    optionalString(body.deviceId, 120, 'web-browser') || 'web-browser',
+    optionalString(body.deviceName, 120, 'Web Terminal') || 'Web Terminal',
   );
-  res.json(session);
+  return res.json(session);
 });
 
 authRouter.post('/auth/pin-login', (req, res) => {
-  const { userId, pin, deviceId, deviceName } = req.body || {};
-  if (!userId || !pin) {
+  const body = requirePlainObject(req.body, 'PIN login request');
+  if (typeof body.userId !== 'string' || !body.userId.trim() || (typeof body.pin !== 'string' && typeof body.pin !== 'number')) {
     return res.status(400).json({ error: 'User and PIN are required.' });
+  }
+  const pinStr = String(body.pin).trim();
+  if (!/^\d{4,6}$/.test(pinStr)) {
+    return res.status(401).json({ error: 'Invalid cashier PIN.' });
   }
   const userRow = db
     .prepare('SELECT * FROM users WHERE id = ? AND is_active = 1')
-    .get(String(userId)) as { pin_hash: string } | undefined;
+    .get(body.userId.trim()) as UserRow | undefined;
 
-  if (!userRow || !userRow.pin_hash || !verifySecret(String(pin), userRow.pin_hash)) {
+  if (!userRow || !userRow.pin_hash || !verifySecret(pinStr, userRow.pin_hash)) {
     return res.status(401).json({ error: 'Invalid cashier PIN.' });
   }
 
   const session = createSessionForUser(
-    userRow as never,
-    String(deviceId || 'web-browser'),
-    String(deviceName || 'Web Terminal'),
+    userRow,
+    optionalString(body.deviceId, 120, 'web-browser') || 'web-browser',
+    optionalString(body.deviceName, 120, 'Web Terminal') || 'Web Terminal',
   );
-  res.json(session);
+  return res.json(session);
 });
 
 authRouter.post('/auth/logout', requireAuth, (req: AuthenticatedRequest, res) => {
@@ -168,21 +182,25 @@ authRouter.delete('/auth/sessions/:id', requireAuth, (req: AuthenticatedRequest,
     return res.status(403).json({ error: 'Only admins can revoke another user session.' });
   }
   db.prepare('DELETE FROM sessions WHERE id = ?').run(targetId);
-  res.json({ ok: true });
+  return res.json({ ok: true });
 });
 
 authRouter.post('/auth/users', requireAuth, requireRole(['admin']), (req: AuthenticatedRequest, res) => {
-  const { username, fullName, email, role, password, pin } = req.body || {};
-  if (!username || !fullName || !password || String(password).length < 6) {
+  const body = requirePlainObject(req.body, 'User payload');
+  const normalized = requireNonEmptyString(body.username, 'Username', 60).toLowerCase();
+  const fullName = requireNonEmptyString(body.fullName, 'Full name', 120);
+  const password = typeof body.password === 'string' ? body.password : '';
+  const role = typeof body.role === 'string' ? body.role : '';
+  if (password.length < 6 || password.length > 200) {
     return res.status(400).json({ error: 'Username, full name, and 6+ char password required.' });
   }
   if (!['admin', 'manager', 'cashier', 'operator'].includes(role)) {
     return res.status(400).json({ error: 'Invalid user role.' });
   }
-  if (pin && !/^\d{4,6}$/.test(String(pin))) {
+  const pin = body.pin !== undefined && body.pin !== null && body.pin !== '' ? String(body.pin).trim() : '';
+  if (pin && !/^\d{4,6}$/.test(pin)) {
     return res.status(400).json({ error: 'PIN must be 4 to 6 digits.' });
   }
-  const normalized = String(username).trim().toLowerCase();
   const exists = db.prepare('SELECT id FROM users WHERE LOWER(username) = ?').get(normalized);
   if (exists) {
     return res.status(409).json({ error: 'Username already exists.' });
@@ -196,11 +214,11 @@ authRouter.post('/auth/users', requireAuth, requireRole(['admin']), (req: Authen
   `).run(
     id,
     normalized,
-    String(fullName).trim(),
-    String(email || '').trim(),
+    fullName,
+    optionalString(body.email, 140),
     role,
-    hashSecret(String(password)),
-    pin ? hashSecret(String(pin)) : '',
+    hashSecret(password),
+    pin ? hashSecret(pin) : '',
     now,
   );
   writeAuditLog(
@@ -211,24 +229,42 @@ authRouter.post('/auth/users', requireAuth, requireRole(['admin']), (req: Authen
     id,
     `Created ${role} account ${normalized}`,
   );
-  const created = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as never;
-  res.status(201).json(sanitizeUser(created));
+  const created = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow;
+  return res.status(201).json(sanitizeUser(created));
 });
 
 authRouter.patch('/auth/users/:id', requireAuth, requireRole(['admin']), (req: AuthenticatedRequest, res) => {
   const id = String(req.params.id);
-  const { fullName, email, role, isActive, newPassword, newPin } = req.body || {};
+  const body = requirePlainObject(req.body, 'User update payload');
+  const { fullName, email, role, isActive, newPassword, newPin } = body;
   const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as Record<string, unknown> | undefined;
   if (!existing) return res.status(404).json({ error: 'User not found.' });
 
+  if (role !== undefined && (typeof role !== 'string' || !['admin', 'manager', 'cashier', 'operator'].includes(role))) {
+    return res.status(400).json({ error: 'Invalid user role.' });
+  }
+  if (newPassword !== undefined && newPassword !== null && newPassword !== '') {
+    if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 200) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+    }
+  }
+  if (newPin !== undefined && newPin !== null && newPin !== '') {
+    if (!/^\d{4,6}$/.test(String(newPin).trim())) {
+      return res.status(400).json({ error: 'PIN must be 4 to 6 digits.' });
+    }
+  }
+  if (fullName !== undefined && (typeof fullName !== 'string' || !fullName.trim())) {
+    return res.status(400).json({ error: 'Full name cannot be empty.' });
+  }
+
   const nextPasswordHash =
-    newPassword && String(newPassword).length >= 6
-      ? hashSecret(String(newPassword))
+    typeof newPassword === 'string' && newPassword.length >= 6
+      ? hashSecret(newPassword)
       : String(existing.password_hash);
   const nextPinHash =
     newPin !== undefined
       ? newPin
-        ? hashSecret(String(newPin))
+        ? hashSecret(String(newPin).trim())
         : ''
       : String(existing.pin_hash);
 
@@ -237,8 +273,8 @@ authRouter.patch('/auth/users/:id', requireAuth, requireRole(['admin']), (req: A
     SET full_name = ?, email = ?, role = ?, is_active = ?, password_hash = ?, pin_hash = ?
     WHERE id = ?
   `).run(
-    fullName ?? existing.full_name,
-    email ?? existing.email,
+    fullName !== undefined ? String(fullName).trim().slice(0, 120) : existing.full_name,
+    email !== undefined ? optionalString(email, 140) : existing.email,
     role ?? existing.role,
     typeof isActive === 'boolean' ? (isActive ? 1 : 0) : existing.is_active,
     nextPasswordHash,
@@ -253,6 +289,6 @@ authRouter.patch('/auth/users/:id', requireAuth, requireRole(['admin']), (req: A
     id,
     `Updated account settings for ${existing.username}`,
   );
-  const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as never;
-  res.json(sanitizeUser(updated));
+  const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow;
+  return res.json(sanitizeUser(updated));
 });

@@ -36,21 +36,38 @@ export const ALLOWED_SUPPLIER_DOC_TYPES = new Set<SupplierDocumentType>([
   'other',
 ]);
 
+export function safeFinite(value: unknown, fallback = 0): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
 export function genId(prefix: string): string {
   return `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
 export function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw) return fallback;
+  if (typeof raw !== 'string' || !raw.trim()) return fallback;
   try {
-    return JSON.parse(raw) as T;
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(fallback) && !Array.isArray(parsed)) {
+      return fallback;
+    }
+    if (
+      fallback !== null &&
+      typeof fallback === 'object' &&
+      !Array.isArray(fallback) &&
+      (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+    ) {
+      return fallback;
+    }
+    return parsed as T;
   } catch {
     return fallback;
   }
 }
 
 export function resolveSupplierDocPath(storageKey: string): string {
-  const safeBase = path.basename(storageKey);
+  const safeBase = path.basename(typeof storageKey === 'string' ? storageKey : '');
   if (!safeBase || safeBase === '.' || safeBase === '..') {
     throw new Error('Invalid storage key.');
   }
@@ -63,7 +80,7 @@ export function resolveSupplierDocPath(storageKey: string): string {
 
 export function sanitizeDownloadFilename(name: string): string {
   const cleaned = path
-    .basename(name)
+    .basename(typeof name === 'string' ? name : '')
     .replace(/[\r\n"\\/:*?<>|]+/g, '_')
     .trim();
   return cleaned || 'supplier-document';

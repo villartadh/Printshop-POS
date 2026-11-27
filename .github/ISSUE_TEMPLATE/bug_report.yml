@@ -1,0 +1,32 @@
+name: Bug Report
+description: Report a functional, UX, or reliability issue in Printshop POS
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Clear description of the bug or unexpected UX behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reproduce the issue (module, viewport, or API payload).
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      options:
+        - POS Terminal & Checkout
+        - Inventory & Suppliers
+        - Print Jobs & Customers
+        - Auth & Terminal Lock
+        - Offline Sync & Persistence
+        - Build / CI / Browser
+    validations:
+      required: true

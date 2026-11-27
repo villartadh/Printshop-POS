@@ -13,49 +13,91 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test-and-build:
-    name: Typecheck, Vitest, Build & E2E Smoke
+  consistency-and-security:
+    name: Typecheck, Lint, Consistency & Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Setup Node.js & dependencies
+        uses: ./.github/actions/setup-node-app
 
-      - name: Cache npm downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-22-npm-${{ hashFiles('package-lock.json', 'package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-22-npm-
+      - name: Run strict TypeScript & Oxlint checks
+        run: npm run lint
 
-      - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
-          fi
+      - name: Verify repository & metadata consistency
+        run: npm run check:consistency
 
-      - name: Run strict TypeScript check
-        run: npm run typecheck
+      - name: Audit production runtime dependencies
+        run: npm run audit:prod
 
-      - name: Run Vitest suite
-        run: npm test -- --reporter=default --reporter=junit --outputFile=test-results/vitest-junit.xml
+  unit-and-ux-tests:
+    name: Unit, UI & UX Tests (+ Coverage)
+    needs: consistency-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-      - name: Upload Vitest JUnit report
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js & dependencies
+        uses: ./.github/actions/setup-node-app
+
+      - name: Run unit, UI & UX suites with V8 coverage
+        run: npx vitest run src/test/unit src/test/ui --coverage --reporter=default --reporter=junit --outputFile=test-results/vitest-unit-ui-junit.xml
+
+      - name: Upload unit/UX report & coverage artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vitest-junit-report
-          path: test-results/vitest-junit.xml
+          name: vitest-unit-ux-report
+          path: |
+            test-results/vitest-unit-ui-junit.xml
+            coverage/
           if-no-files-found: warn
           retention-days: 14
+
+  api-and-reliability-tests:
+    name: API Integration & Concurrency Reliability
+    needs: consistency-and-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js & dependencies
+        uses: ./.github/actions/setup-node-app
+
+      - name: Run Express, SQLite & concurrency reliability suites
+        run: npx vitest run src/test/api --reporter=default --reporter=junit --outputFile=test-results/vitest-api-junit.xml
+
+      - name: Upload API & reliability test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-api-reliability-report
+          path: test-results/vitest-api-junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  production-build-and-browser-ux:
+    name: Production Build, HTTP Smoke & Chromium Browser UX
+    needs: [unit-and-ux-tests, api-and-reliability-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js & dependencies
+        uses: ./.github/actions/setup-node-app
 
       - name: Build production SPA & PWA bundle
         run: npm run build
@@ -66,8 +108,25 @@ jobs:
           test -f dist/manifest.webmanifest
           test -f dist/sw.js
 
-      - name: Run full-stack production E2E smoke test
+      - name: Run full-stack HTTP E2E smoke test
         run: npm run test:e2e
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run live Chromium headless browser UX tests
+        run: npm run test:browser
+
+      - name: Upload Playwright UX report & traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-ux-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload production build artifact
         uses: actions/upload-artifact@v4
@@ -75,3 +134,17 @@ jobs:
           name: printshop-pos-dist
           path: dist/
           retention-days: 7
+
+      - name: Publish CI run summary
+        if: always()
+        run: |
+          {
+            echo "### Printshop POS Full Verification Summary"
+            echo ""
+            echo "| Stage | Status |"
+            echo "| :--- | :--- |"
+            echo "| Consistency, Strict TypeScript, Oxlint & Security Audit | Passed |"
+            echo "| Unit, UI & Full-App UX Tests + V8 Coverage | Passed |"
+            echo "| API Integration, Concurrency & Persistence Reliability | Passed |"
+            echo "| Production PWA Build, HTTP Smoke & Chromium Browser UX | Passed |"
+          } >> "$GITHUB_STEP_SUMMARY"

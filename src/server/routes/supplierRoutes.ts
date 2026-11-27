@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'fs';
 import { db, writeAuditLog } from '../db.ts';
 import { requireAuth, requireRole, type AuthenticatedRequest } from '../auth.ts';
+import { HttpError, parseFiniteNumber } from '../httpUtils.ts';
 import { applyInventoryAdjustment } from './inventoryRoutes.ts';
 import {
   ALLOWED_SUPPLIER_DOC_MIMES,
@@ -95,9 +96,13 @@ supplierRouter.post(
       });
     }
 
-    const cleanBase64 = rawBase64.includes(',')
+    const cleanBase64 = (rawBase64.includes(',')
       ? rawBase64.slice(rawBase64.indexOf(',') + 1)
-      : rawBase64;
+      : rawBase64
+    ).replace(/\s+/g, '');
+    if (!cleanBase64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleanBase64)) {
+      return res.status(400).json({ error: 'Uploaded file payload is not valid base64 data.' });
+    }
     const buffer = Buffer.from(cleanBase64, 'base64');
     if (!buffer || buffer.length === 0) {
       return res.status(400).json({ error: 'Uploaded file appears empty or corrupted.' });
@@ -120,7 +125,11 @@ supplierRouter.post(
       return res.status(400).json({ error: 'Invalid storage path.' });
     }
 
-    fs.writeFileSync(resolvedPath, buffer);
+    try {
+      fs.writeFileSync(resolvedPath, buffer);
+    } catch {
+      throw new HttpError(500, 'Failed to store uploaded document on disk.');
+    }
 
     try {
       db.prepare(`
@@ -169,7 +178,7 @@ supplierRouter.post(
     const created = db
       .prepare('SELECT * FROM supplier_documents WHERE id = ?')
       .get(id) as Record<string, unknown>;
-    res.status(201).json({
+    return res.status(201).json({
       document: mapSupplierDocumentRow(created),
     });
   },
@@ -209,7 +218,11 @@ supplierRouter.get('/supplier-documents/:id/file', requireAuth, (req, res) => {
     'Content-Disposition',
     `${forceDownload ? 'attachment' : 'inline'}; filename="${safeName}"`,
   );
-  return res.sendFile(resolvedPath);
+  return res.sendFile(resolvedPath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(500).json({ error: 'Unable to read stored supplier document.' });
+    }
+  });
 });
 
 supplierRouter.delete(
@@ -246,7 +259,7 @@ supplierRouter.delete(
       id,
       `Removed document "${String(existing.title)}" from ${String(existing.supplier_name)}`,
     );
-    res.json({ ok: true, id });
+    return res.json({ ok: true, id });
   },
 );
 
@@ -294,18 +307,24 @@ supplierRouter.post(
           Boolean(line) &&
           typeof line.inventoryItemId === 'string' &&
           line.inventoryItemId.trim().length > 0 &&
+          Number.isFinite(Number(line.quantity)) &&
           Number(line.quantity) > 0,
       )
-      .map((line) => ({
-        inventoryItemId: line.inventoryItemId.trim(),
-        quantity: Number(Number(line.quantity).toFixed(2)),
-        unitCost:
-          line.unitCost !== undefined &&
-          Number.isFinite(Number(line.unitCost)) &&
-          Number(line.unitCost) >= 0
-            ? Number(Number(line.unitCost).toFixed(2))
-            : undefined,
-      }));
+      .map((line) => {
+        const quantity = parseFiniteNumber(line.quantity, 'Order quantity', {
+          min: 0.01,
+          max: 1_000_000,
+        });
+        const unitCost =
+          line.unitCost !== undefined && line.unitCost !== null && line.unitCost !== ('' as unknown)
+            ? Number(parseFiniteNumber(line.unitCost, 'Unit cost', { min: 0, max: 1_000_000_000 }).toFixed(2))
+            : undefined;
+        return {
+          inventoryItemId: line.inventoryItemId.trim(),
+          quantity: Number(quantity.toFixed(2)),
+          unitCost,
+        };
+      });
 
     if (sanitizedLines.length === 0) {
       return res.status(400).json({ error: 'Each order line requires a positive quantity.' });
@@ -347,7 +366,7 @@ supplierRouter.post(
     });
     run();
 
-    res.status(201).json({
+    return res.status(201).json({
       reference,
       supplierName,
       movements,
@@ -445,7 +464,7 @@ supplierRouter.post(
       string,
       unknown
     >;
-    res.status(201).json({
+    return res.status(201).json({
       supplier: mapSupplierRow(created),
       syncedItemsCount,
     });
@@ -581,7 +600,7 @@ supplierRouter.patch(
       string,
       unknown
     >;
-    res.json({
+    return res.json({
       supplier: mapSupplierRow(updated),
       syncedItemsCount,
     });
@@ -609,6 +628,6 @@ supplierRouter.delete(
       id,
       `Removed supplier profile ${existing.name}`,
     );
-    res.json({ ok: true, id });
+    return res.json({ ok: true, id });
   },
 );

@@ -473,4 +473,50 @@ describe('Printshop POS API integration', () => {
     expect(ackRes.status).toBe(200);
     expect(ackRes.body.event.systemAlertStatus).toBe('acknowledged');
   });
+
+  it('rejects invalid numeric, base64, and malformed payloads cleanly with 400 status', async () => {
+    const invRes = await request(app)
+      .get('/api/inventory')
+      .set('Authorization', `Bearer ${adminToken}`);
+    const mugItem = (invRes.body.items as Array<{ id: string; sku: string }>).find(
+      (i) => i.sku === 'MUG-WHT-001',
+    )!;
+
+    const badDelta = await request(app)
+      .post(`/api/inventory/${mugItem.id}/adjust`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ movementType: 'purchase', quantityDelta: 'not-a-number' });
+    expect(badDelta.status).toBe(400);
+
+    const badUnitCost = await request(app)
+      .post(`/api/inventory/${mugItem.id}/adjust`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ movementType: 'purchase', quantityDelta: 5, unitCost: -10 });
+    expect(badUnitCost.status).toBe(400);
+
+    const badPatch = await request(app)
+      .patch(`/api/inventory/${mugItem.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ unitCost: 'NaN' });
+    expect(badPatch.status).toBe(400);
+
+    const badBase64 = await request(app)
+      .post('/api/suppliers/documents')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        supplierName: 'Alpha Merch Group',
+        docType: 'contract',
+        title: 'Corrupt File',
+        fileName: 'bad.txt',
+        mimeType: 'text/plain',
+        dataBase64: '!!!not-valid-base64!!!',
+      });
+    expect(badBase64.status).toBe(400);
+
+    const badPayBal = await request(app)
+      .post('/api/customers/cust-missing/pay-balance')
+      .set('Authorization', `Bearer ${cashierToken}`)
+      .send({ amount: -50 });
+    expect(badPayBal.status).toBe(400);
+  });
 });

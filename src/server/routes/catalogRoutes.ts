@@ -1,6 +1,12 @@
 import express from 'express';
 import { db, writeAuditLog } from '../db.ts';
-import { requireAuth, requireRole, sanitizeUser, type AuthenticatedRequest } from '../auth.ts';
+import {
+  requireAuth,
+  requireRole,
+  sanitizeUser,
+  type AuthenticatedRequest,
+  type UserRow,
+} from '../auth.ts';
 import {
   genId,
   mapInventoryItemRow,
@@ -152,7 +158,7 @@ catalogRouter.get('/bootstrap', requireAuth, (_req, res) => {
   }));
 
   const users = (
-    db.prepare('SELECT * FROM users ORDER BY created_at ASC').all() as Array<never>
+    db.prepare('SELECT * FROM users ORDER BY created_at ASC').all() as UserRow[]
   ).map(sanitizeUser);
 
   const auditLogs = (
@@ -227,7 +233,7 @@ catalogRouter.put(
       'app_settings',
       'Updated business branding, layout, and system settings',
     );
-    res.json(updated);
+    return res.json(updated);
   },
 );
 
@@ -251,7 +257,7 @@ catalogRouter.post(
       cat.name,
       cat.sortOrder,
     );
-    res.status(201).json(cat);
+    return res.status(201).json(cat);
   },
 );
 
@@ -319,7 +325,7 @@ catalogRouter.post(
       `Created printing service ${s.name}`,
     );
     const created = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as Record<string, unknown>;
-    res.status(201).json(mapServiceRow(created));
+    return res.status(201).json(mapServiceRow(created));
   },
 );
 
@@ -370,7 +376,7 @@ catalogRouter.put(
       id,
     );
     const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as Record<string, unknown>;
-    res.json(mapServiceRow(updated));
+    return res.json(mapServiceRow(updated));
   },
 );
 

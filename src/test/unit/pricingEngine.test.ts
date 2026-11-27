@@ -192,4 +192,30 @@ describe('pricingEngine', () => {
     expect(inclusive.taxAmount).toBe(19.29);
     expect(inclusive.totalAmount).toBe(180);
   });
+
+  it('handles division by zero, malformed formulas, and non-finite/negative inputs gracefully', () => {
+    expect(evaluateFormulaExpression('100 / 0', { base: 10 })).toBeNull();
+    expect(evaluateFormulaExpression('(base + 5', { base: 10 })).toBeNull();
+    expect(evaluateFormulaExpression('unknownVar + 5', { base: 10 })).toBeNull();
+    expect(evaluateFormulaExpression('-10', { base: 10 })).toBeNull();
+    expect(evaluateFormulaExpression('-(10) + 25', { base: 10 })).toBe(15);
+    expect(evaluateFormulaExpression('base * (qty + 1) / 2', { base: 20, qty: 3 })).toBe(40);
+
+    expect(roundAmount(Number.NaN, { ...baseCurrency, decimalPlaces: -3 })).toBe(0);
+    expect(roundAmount(12.3456, { ...baseCurrency, decimalPlaces: 99 })).toBe(12.3456);
+
+    const safeOrder = calculateOrderTotals(
+      null as unknown as CartItem[],
+      'percent',
+      Number.POSITIVE_INFINITY,
+      { ...baseCurrency, taxEnabled: true, taxRatePercent: Number.NaN },
+    );
+    expect(safeOrder).toEqual({
+      subtotal: 0,
+      itemDiscountsTotal: 0,
+      orderDiscountAmount: 0,
+      taxAmount: 0,
+      totalAmount: 0,
+    });
+  });
 });

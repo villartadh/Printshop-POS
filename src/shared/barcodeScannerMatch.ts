@@ -20,22 +20,31 @@ export interface InventoryScanMatchResult {
   suggestedUnitCost?: number;
 }
 
+const MAX_SCAN_INPUT_LENGTH = 4096;
+
 function parsePositiveNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return undefined;
+  if (!Number.isFinite(num) || num <= 0 || num > 1_000_000) return undefined;
   return Number(num.toFixed(2));
 }
 
 function parseNonNegativeNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const num = Number(value);
-  if (!Number.isFinite(num) || num < 0) return undefined;
+  if (!Number.isFinite(num) || num < 0 || num > 10_000_000) return undefined;
   return Number(num.toFixed(2));
 }
 
 export function parseScannedCodePayload(raw: string): ParsedScanPayload {
-  const rawCode = raw.trim();
+  if (typeof raw !== 'string') {
+    return {
+      rawCode: '',
+      normalizedCode: '',
+      lookupCandidates: [],
+    };
+  }
+  const rawCode = raw.trim().slice(0, MAX_SCAN_INPUT_LENGTH);
   if (!rawCode) {
     return {
       rawCode: '',
@@ -60,20 +69,21 @@ export function parseScannedCodePayload(raw: string): ParsedScanPayload {
   // 1. JSON QR payload (e.g. {"sku":"PPR-A4-001","qty":50,"unitCost":245})
   if (rawCode.startsWith('{') && rawCode.endsWith('}')) {
     try {
-      const parsed = JSON.parse(rawCode) as Record<string, unknown>;
-      if (parsed && typeof parsed === 'object') {
-        pushCandidate(parsed.barcode);
-        pushCandidate(parsed.sku);
-        pushCandidate(parsed.code);
-        pushCandidate(parsed.supplierSku);
-        pushCandidate(parsed.supplier_sku);
-        pushCandidate(parsed.id);
-        pushCandidate(parsed.itemId);
+      const parsed: unknown = JSON.parse(rawCode);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const record = parsed as Record<string, unknown>;
+        pushCandidate(record.barcode);
+        pushCandidate(record.sku);
+        pushCandidate(record.code);
+        pushCandidate(record.supplierSku);
+        pushCandidate(record.supplier_sku);
+        pushCandidate(record.id);
+        pushCandidate(record.itemId);
         suggestedQty = parsePositiveNumber(
-          parsed.qty ?? parsed.quantity ?? parsed.receivedQty ?? parsed.amount,
+          record.qty ?? record.quantity ?? record.receivedQty ?? record.amount,
         );
         suggestedUnitCost = parseNonNegativeNumber(
-          parsed.unitCost ?? parsed.cost ?? parsed.price,
+          record.unitCost ?? record.cost ?? record.price,
         );
         if (candidates.length > 0) {
           normalizedCode = candidates[0];
@@ -126,8 +136,10 @@ export function parseScannedCodePayload(raw: string): ParsedScanPayload {
   const prefixMatch = rawCode.match(/^(sku|barcode|code|id)\s*[:=]\s*(.+)$/i);
   if (prefixMatch && prefixMatch[2]) {
     const extracted = prefixMatch[2].trim();
-    pushCandidate(extracted);
-    normalizedCode = extracted;
+    if (extracted) {
+      pushCandidate(extracted);
+      normalizedCode = extracted;
+    }
   }
 
   pushCandidate(rawCode);
@@ -146,12 +158,15 @@ export function matchInventoryItemFromScan(
   items: InventoryItem[],
 ): InventoryScanMatchResult {
   const parsed = parseScannedCodePayload(rawCode);
-  if (parsed.lookupCandidates.length === 0) {
+  const safeItems = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (parsed.lookupCandidates.length === 0 || safeItems.length === 0) {
     return {
       rawCode: parsed.rawCode,
-      normalizedCode: '',
+      normalizedCode: parsed.normalizedCode,
       item: null,
       matchedBy: null,
+      suggestedQty: parsed.suggestedQty,
+      suggestedUnitCost: parsed.suggestedUnitCost,
     };
   }
 
@@ -159,7 +174,7 @@ export function matchInventoryItemFromScan(
 
   // Pass 1: exact item.barcode
   for (const target of normalizedTargets) {
-    const found = items.find(
+    const found = safeItems.find(
       (item) => (item.barcode || '').trim().toLowerCase() === target,
     );
     if (found) {
@@ -176,7 +191,7 @@ export function matchInventoryItemFromScan(
 
   // Pass 2: exact item.sku
   for (const target of normalizedTargets) {
-    const found = items.find(
+    const found = safeItems.find(
       (item) => (item.sku || '').trim().toLowerCase() === target,
     );
     if (found) {
@@ -193,7 +208,7 @@ export function matchInventoryItemFromScan(
 
   // Pass 3: exact supplierSku
   for (const target of normalizedTargets) {
-    const found = items.find((item) => {
+    const found = safeItems.find((item) => {
       const supSku = (extractSupplierInfo(item).supplierSku || '').trim().toLowerCase();
       return supSku.length > 0 && supSku === target;
     });
@@ -211,7 +226,7 @@ export function matchInventoryItemFromScan(
 
   // Pass 4: exact item.id
   for (const target of normalizedTargets) {
-    const found = items.find((item) => item.id.trim().toLowerCase() === target);
+    const found = safeItems.find((item) => (item.id || '').trim().toLowerCase() === target);
     if (found) {
       return {
         rawCode: parsed.rawCode,

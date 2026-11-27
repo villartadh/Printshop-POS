@@ -91,7 +91,8 @@ function mapCriticalAlertEventRow(row: Record<string, unknown>): CriticalAlertEv
 }
 
 export function listCriticalAlertEvents(limit = 100): CriticalAlertEvent[] {
-  const safeLimit = Math.min(250, Math.max(1, Math.round(limit)));
+  const numericLimit = Number.isFinite(limit) ? limit : 100;
+  const safeLimit = Math.min(250, Math.max(1, Math.round(numericLimit)));
   const rows = db
     .prepare('SELECT * FROM critical_alert_events ORDER BY triggered_at DESC LIMIT ?')
     .all(safeLimit) as Array<Record<string, unknown>>;
@@ -184,7 +185,11 @@ async function sendCriticalDigestEmail(
   }
 
   const host = String(process.env.SMTP_HOST || '').trim();
-  const port = Number(process.env.SMTP_PORT) || 587;
+  const parsedPort = Number(process.env.SMTP_PORT);
+  const port =
+    Number.isFinite(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+      ? Math.round(parsedPort)
+      : 587;
   const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || port === 465;
   const user = String(process.env.SMTP_USER || '').trim();
   const pass = String(process.env.SMTP_PASS || '');

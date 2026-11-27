@@ -375,6 +375,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setExpenses(data.expenses);
       setShifts(data.shifts);
       setUsers(data.users);
+      setQuickUsers(
+        (data.users || [])
+          .filter((u) => u.isActive)
+          .map((u) => ({
+            id: u.id,
+            username: u.username,
+            fullName: u.fullName,
+            role: u.role,
+            hasPin: u.hasPin,
+          })),
+      );
       setAuditLogs(data.auditLogs);
       if (data.criticalAlertConfig) {
         setCriticalAlertConfig(normalizeCriticalAlertConfig(data.criticalAlertConfig));

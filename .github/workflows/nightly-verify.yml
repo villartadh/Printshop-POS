@@ -1,0 +1,31 @@
+name: Weekly Node Matrix Verification
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-matrix-verify:
+    name: Full App Verify (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22', '24']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }} & dependencies
+        uses: ./.github/actions/setup-node-app
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run full verification pipeline
+        run: npm run ci:check

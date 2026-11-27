@@ -118,4 +118,17 @@ describe('inventoryModel', () => {
     expect(getSuggestedRestockQuantity(mini[0])).toBe(30); // 20*2 - 10
     expect(getSuggestedRestockQuantity(mini[1])).toBe(0); // above reorder
   });
+
+  it('rejects non-finite, extreme, and malformed inventory inputs and handles nullish collections', () => {
+    expect(validateInventoryItemInput({ name: 'A4', unit: 'sheet', quantityOnHand: Number.NaN }).valid).toBe(false);
+    expect(validateInventoryItemInput({ name: 'A4', unit: 'sheet', unitCost: Number.POSITIVE_INFINITY }).valid).toBe(false);
+    expect(validateInventoryItemInput({ name: 'A4', unit: 'sheet', reorderLevel: 2e9 }).valid).toBe(false);
+    expect(validateStockMovementInput({ movementType: 'purchase', quantityDelta: Number.NaN }).valid).toBe(false);
+    expect(validateStockMovementInput({ movementType: 'purchase', quantityDelta: Number.POSITIVE_INFINITY }).valid).toBe(false);
+    expect(validateStockMovementInput({ movementType: 'purchase', quantityDelta: 5e7 }).valid).toBe(false);
+
+    expect(calculateInventoryValuation(null as unknown as InventoryItem[])).toBe(0);
+    expect(filterInventoryItems(null as unknown as InventoryItem[], { search: 'a4' })).toEqual([]);
+    expect(buildInventoryAlertNotifications(null as unknown as InventoryItem[]).notifications).toEqual([]);
+  });
 });

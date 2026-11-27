@@ -1,0 +1,33 @@
+name: Setup Node.js App
+description: Sets up Node.js, caches npm downloads, and installs dependencies via npm ci (with lockfile-free fallback).
+
+inputs:
+  node-version:
+    description: Node.js version to provision on the runner
+    required: false
+    default: '22'
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js ${{ inputs.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Cache npm downloads
+      uses: actions/cache@v4
+      with:
+        path: ~/.npm
+        key: ${{ runner.os }}-node-${{ inputs.node-version }}-npm-${{ hashFiles('package-lock.json', 'package.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-${{ inputs.node-version }}-npm-
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        if [ -f package-lock.json ]; then
+          npm ci --no-audit --no-fund
+        else
+          npm install --no-audit --no-fund
+        fi

@@ -63,14 +63,50 @@ export function mergeSettingsWithDefaults(
           ? raw.shellPreferences.sidebarCollapsed
           : Boolean(DEFAULT_SETTINGS.shellPreferences?.sidebarCollapsed),
     },
-    tokens: {
-      ...DEFAULT_SETTINGS.tokens,
-      ...(raw.tokens && typeof raw.tokens === 'object' ? raw.tokens : {}),
-    },
-    branding: {
-      ...DEFAULT_SETTINGS.branding,
-      ...(raw.branding && typeof raw.branding === 'object' ? raw.branding : {}),
-    },
+    tokens: (() => {
+      const merged = {
+        ...DEFAULT_SETTINGS.tokens,
+        ...(raw.tokens && typeof raw.tokens === 'object' ? raw.tokens : {}),
+      };
+      const clampNum = (v: unknown, min: number, max: number, fallback: number) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+      };
+      return {
+        ...merged,
+        borderRadiusPx: clampNum(
+          merged.borderRadiusPx,
+          0,
+          24,
+          DEFAULT_SETTINGS.tokens.borderRadiusPx,
+        ),
+        sidebarWidthPx: clampNum(
+          merged.sidebarWidthPx,
+          200,
+          280,
+          DEFAULT_SETTINGS.tokens.sidebarWidthPx,
+        ),
+        fontSizeScale: clampNum(
+          merged.fontSizeScale,
+          0.85,
+          1.25,
+          DEFAULT_SETTINGS.tokens.fontSizeScale,
+        ),
+      };
+    })(),
+    branding: (() => {
+      const merged = {
+        ...DEFAULT_SETTINGS.branding,
+        ...(raw.branding && typeof raw.branding === 'object' ? raw.branding : {}),
+      };
+      return {
+        ...merged,
+        appName:
+          typeof merged.appName === 'string' && merged.appName.trim()
+            ? merged.appName.trim()
+            : DEFAULT_SETTINGS.branding.appName,
+      };
+    })(),
     posLayout: {
       ...DEFAULT_SETTINGS.posLayout,
       ...(raw.posLayout && typeof raw.posLayout === 'object' ? raw.posLayout : {}),
