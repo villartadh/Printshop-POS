@@ -5,6 +5,8 @@ import { AuthScreen } from './modules/auth/AuthScreen.tsx';
 import { PinLockModal } from './modules/auth/PinLockModal.tsx';
 import { AppShell } from './components/layout/AppShell.tsx';
 import { LoadingState } from './components/ui/Overlays.tsx';
+import { ErrorBoundary } from './components/ui/ErrorBoundary.tsx';
+import { appendDiagnosticLog } from './services/offlineDb.ts';
 
 const RootRouter: React.FC = () => {
   const { authChecked, session } = useApp();
@@ -35,7 +37,20 @@ export default function App() {
   return (
     <AppStateProvider>
       <AppProvider>
-        <RootRouter />
+        <ErrorBoundary
+          fullScreen
+          title="Application Error"
+          description="Something unexpected happened while rendering the workspace. Try recovering the view or reloading the app."
+          onError={(error) => {
+            void appendDiagnosticLog({
+              level: 'error',
+              category: 'storage',
+              message: `Runtime UI error: ${error.message || 'Unknown error'}`,
+            });
+          }}
+        >
+          <RootRouter />
+        </ErrorBoundary>
       </AppProvider>
     </AppStateProvider>
   );
