@@ -20,6 +20,10 @@ import {
 } from '../mappers.ts';
 import { DEFAULT_SETTINGS } from '../../shared/defaults.ts';
 import {
+  cloneServiceDraft,
+  normalizeAndValidateServicePayload,
+} from '../../shared/serviceTemplates.ts';
+import {
   getCriticalAlertConfig,
   isSmtpConfigured,
   listCriticalAlertEvents,
@@ -276,11 +280,28 @@ catalogRouter.post(
   requireAuth,
   requireRole(['admin', 'manager']),
   (req: AuthenticatedRequest, res) => {
-    const s = req.body as Partial<PrintService>;
-    if (!s.name || !s.categoryId || !s.pricingMethod) {
-      return res.status(400).json({ error: 'Service name, category, and pricing method are required.' });
+    const body = (req.body || {}) as Partial<PrintService>;
+    const validation = normalizeAndValidateServicePayload(body);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
-    const id = s.id || genId('srv');
+    const s = validation.service;
+
+    const categoryExists = db
+      .prepare('SELECT id FROM categories WHERE id = ?')
+      .get(s.categoryId) as { id: string } | undefined;
+    if (!categoryExists) {
+      return res.status(400).json({ error: 'Selected service category does not exist.' });
+    }
+
+    const skuConflict = db
+      .prepare('SELECT id FROM services WHERE LOWER(sku) = LOWER(?)')
+      .get(s.sku) as { id: string } | undefined;
+    if (skuConflict) {
+      return res.status(409).json({ error: `A service with SKU "${s.sku}" already exists.` });
+    }
+
+    const id = typeof body.id === 'string' && body.id.trim() ? body.id.trim() : genId('srv');
     const now = new Date().toISOString();
     db.prepare(`
       INSERT INTO services (
@@ -292,26 +313,26 @@ catalogRouter.post(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
     `).run(
       id,
-      s.sku || `SRV-${Date.now().toString().slice(-4)}`,
-      String(s.name).trim(),
+      s.sku,
+      s.name,
       s.categoryId,
-      s.description || '',
-      s.iconName || 'Printer',
+      s.description,
+      s.iconName,
       s.pricingMethod,
-      Number(s.basePrice) || 0,
-      s.unitLabel || 'pc',
-      Number(s.costEstimate) || 0,
+      s.basePrice,
+      s.unitLabel,
+      s.costEstimate,
       s.requiresConfiguration ? 1 : 0,
       s.requiresProductionJob ? 1 : 0,
       s.allowCustomDimensions ? 1 : 0,
       s.allowPagesAndCopies ? 1 : 0,
       s.allowRushFee ? 1 : 0,
-      Number(s.rushFeePercent) || 25,
-      Number(s.defaultDesignFee) || 0,
-      JSON.stringify(s.bulkTiers || []),
+      s.rushFeePercent,
+      s.defaultDesignFee,
+      JSON.stringify(s.bulkTiers),
       s.formulaExpression || '',
-      JSON.stringify(s.attributeGroups || []),
-      JSON.stringify(s.consumables || []),
+      JSON.stringify(s.attributeGroups),
+      JSON.stringify(s.consumables),
       s.isFavorite ? 1 : 0,
       s.isArchived ? 1 : 0,
       now,
@@ -322,7 +343,7 @@ catalogRouter.post(
       'SERVICE_CREATED',
       'service',
       id,
-      `Created printing service ${s.name}`,
+      `Created printing service ${s.name} (${s.sku})`,
     );
     const created = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as Record<string, unknown>;
     return res.status(201).json(mapServiceRow(created));
@@ -335,9 +356,38 @@ catalogRouter.put(
   requireRole(['admin', 'manager']),
   (req: AuthenticatedRequest, res) => {
     const id = String(req.params.id);
-    const s = req.body as Partial<PrintService>;
-    const existing = db.prepare('SELECT id FROM services WHERE id = ?').get(id);
-    if (!existing) return res.status(404).json({ error: 'Service not found.' });
+    const existingRow = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!existingRow) return res.status(404).json({ error: 'Service not found.' });
+
+    const existing = mapServiceRow(existingRow);
+    const body = (req.body || {}) as Partial<PrintService>;
+    const merged: Partial<PrintService> = {
+      ...existing,
+      ...body,
+      id,
+    };
+
+    const validation = normalizeAndValidateServicePayload(merged);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
+    const s = validation.service;
+
+    const categoryExists = db
+      .prepare('SELECT id FROM categories WHERE id = ?')
+      .get(s.categoryId) as { id: string } | undefined;
+    if (!categoryExists) {
+      return res.status(400).json({ error: 'Selected service category does not exist.' });
+    }
+
+    const skuConflict = db
+      .prepare('SELECT id FROM services WHERE LOWER(sku) = LOWER(?) AND id != ?')
+      .get(s.sku, id) as { id: string } | undefined;
+    if (skuConflict) {
+      return res.status(409).json({ error: `A service with SKU "${s.sku}" already exists.` });
+    }
 
     const now = new Date().toISOString();
     db.prepare(`
@@ -350,33 +400,137 @@ catalogRouter.put(
         is_archived = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      s.sku || 'SRV',
-      String(s.name || '').trim(),
-      s.categoryId || 'cat-print',
-      s.description || '',
-      s.iconName || 'Printer',
-      s.pricingMethod || 'fixed',
-      Number(s.basePrice) || 0,
-      s.unitLabel || 'pc',
-      Number(s.costEstimate) || 0,
+      s.sku,
+      s.name,
+      s.categoryId,
+      s.description,
+      s.iconName,
+      s.pricingMethod,
+      s.basePrice,
+      s.unitLabel,
+      s.costEstimate,
       s.requiresConfiguration ? 1 : 0,
       s.requiresProductionJob ? 1 : 0,
       s.allowCustomDimensions ? 1 : 0,
       s.allowPagesAndCopies ? 1 : 0,
       s.allowRushFee ? 1 : 0,
-      Number(s.rushFeePercent) || 25,
-      Number(s.defaultDesignFee) || 0,
-      JSON.stringify(s.bulkTiers || []),
+      s.rushFeePercent,
+      s.defaultDesignFee,
+      JSON.stringify(s.bulkTiers),
       s.formulaExpression || '',
-      JSON.stringify(s.attributeGroups || []),
-      JSON.stringify(s.consumables || []),
+      JSON.stringify(s.attributeGroups),
+      JSON.stringify(s.consumables),
       s.isFavorite ? 1 : 0,
       s.isArchived ? 1 : 0,
       now,
       id,
     );
+    writeAuditLog(
+      req.authUser!.id,
+      req.authUser!.fullName,
+      'SERVICE_UPDATED',
+      'service',
+      id,
+      `Updated printing service ${s.name} (${s.sku})`,
+    );
     const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(id) as Record<string, unknown>;
     return res.json(mapServiceRow(updated));
+  },
+);
+
+catalogRouter.post(
+  '/services/:id/duplicate',
+  requireAuth,
+  requireRole(['admin', 'manager']),
+  (req: AuthenticatedRequest, res) => {
+    const sourceId = String(req.params.id);
+    const sourceRow = db.prepare('SELECT * FROM services WHERE id = ?').get(sourceId) as
+      | Record<string, unknown>
+      | undefined;
+    if (!sourceRow) {
+      return res.status(404).json({ error: 'Source service not found.' });
+    }
+
+    const sourceService = mapServiceRow(sourceRow);
+    const allRows = db.prepare('SELECT * FROM services').all() as Array<Record<string, unknown>>;
+    const existingServices = allRows.map(mapServiceRow);
+    const draft = cloneServiceDraft(sourceService, existingServices);
+
+    const overrides = (req.body || {}) as Partial<PrintService>;
+    const validation = normalizeAndValidateServicePayload({
+      ...draft,
+      ...(typeof overrides.name === 'string' && overrides.name.trim()
+        ? { name: overrides.name.trim() }
+        : {}),
+      ...(typeof overrides.sku === 'string' && overrides.sku.trim()
+        ? { sku: overrides.sku.trim() }
+        : {}),
+      ...(typeof overrides.categoryId === 'string' && overrides.categoryId.trim()
+        ? { categoryId: overrides.categoryId.trim() }
+        : {}),
+    });
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
+    const s = validation.service;
+
+    const skuConflict = db
+      .prepare('SELECT id FROM services WHERE LOWER(sku) = LOWER(?)')
+      .get(s.sku) as { id: string } | undefined;
+    if (skuConflict) {
+      return res.status(409).json({ error: `A service with SKU "${s.sku}" already exists.` });
+    }
+
+    const newId = genId('srv');
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO services (
+        id, sku, name, category_id, description, icon_name, pricing_method, base_price, unit_label,
+        cost_estimate, requires_configuration, requires_production_job, allow_custom_dimensions,
+        allow_pages_and_copies, allow_rush_fee, rush_fee_percent, default_design_fee,
+        bulk_tiers_json, formula_expression, attribute_groups_json, consumables_json,
+        is_favorite, is_archived, is_demo, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+    `).run(
+      newId,
+      s.sku,
+      s.name,
+      s.categoryId,
+      s.description,
+      s.iconName,
+      s.pricingMethod,
+      s.basePrice,
+      s.unitLabel,
+      s.costEstimate,
+      s.requiresConfiguration ? 1 : 0,
+      s.requiresProductionJob ? 1 : 0,
+      s.allowCustomDimensions ? 1 : 0,
+      s.allowPagesAndCopies ? 1 : 0,
+      s.allowRushFee ? 1 : 0,
+      s.rushFeePercent,
+      s.defaultDesignFee,
+      JSON.stringify(s.bulkTiers),
+      s.formulaExpression || '',
+      JSON.stringify(s.attributeGroups),
+      JSON.stringify(s.consumables),
+      s.isFavorite ? 1 : 0,
+      s.isArchived ? 1 : 0,
+      now,
+    );
+
+    writeAuditLog(
+      req.authUser!.id,
+      req.authUser!.fullName,
+      'SERVICE_DUPLICATED',
+      'service',
+      newId,
+      `Duplicated ${sourceService.name} into ${s.name} (${s.sku})`,
+    );
+
+    const created = db
+      .prepare('SELECT * FROM services WHERE id = ?')
+      .get(newId) as Record<string, unknown>;
+    return res.status(201).json(mapServiceRow(created));
   },
 );
 
@@ -386,6 +540,12 @@ catalogRouter.delete(
   requireRole(['admin', 'manager']),
   (req: AuthenticatedRequest, res) => {
     const id = String(req.params.id);
+    const existing = db.prepare('SELECT id, name FROM services WHERE id = ?').get(id) as
+      | { id: string; name: string }
+      | undefined;
+    if (!existing) {
+      return res.status(404).json({ error: 'Service not found.' });
+    }
     db.prepare('DELETE FROM services WHERE id = ?').run(id);
     writeAuditLog(
       req.authUser!.id,
@@ -393,8 +553,8 @@ catalogRouter.delete(
       'SERVICE_DELETED',
       'service',
       id,
-      `Deleted service ${id}`,
+      `Deleted service ${existing.name} (${id})`,
     );
-    res.json({ ok: true });
+    return res.json({ ok: true });
   },
 );

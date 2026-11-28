@@ -212,6 +212,7 @@ interface AppContextValue {
   createCategory: (name: string) => Promise<void>;
   deleteCategory: (id: string) => Promise<void>;
   saveService: (service: Partial<PrintService> & { id?: string }) => Promise<PrintService>;
+  duplicateService: (id: string, overrides?: Partial<PrintService>) => Promise<PrintService>;
   deleteService: (id: string) => Promise<void>;
   createPrintJob: (job: Partial<PrintJob>) => Promise<PrintJob>;
   updatePrintJob: (
@@ -707,6 +708,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await refreshBootstrap();
     notify(`Service "${saved.name}" saved.`, 'success');
     return saved;
+  };
+
+  const duplicateService = async (id: string, overrides?: Partial<PrintService>) => {
+    const cloned = await apiRequest<PrintService>(`/api/services/${id}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify(overrides || {}),
+    });
+    await refreshBootstrap();
+    notify(`Cloned service "${cloned.name}".`, 'success');
+    return cloned;
   };
 
   const deleteService = async (id: string) => {
@@ -1622,6 +1633,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createCategory,
     deleteCategory,
     saveService,
+    duplicateService,
     deleteService,
     createPrintJob,
     updatePrintJob,

@@ -117,7 +117,16 @@ export const ServiceConfigurator: React.FC<ServiceConfiguratorProps> = ({
           </label>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {group.options.map((opt) => {
-              const active = config.selectedAttributes[group.key] === opt.id;
+              const selectedKey =
+                config.selectedAttributes[group.key] ||
+                group.defaultOptionId ||
+                group.options[0]?.id;
+              const active = selectedKey === opt.id;
+              const hasDelta = opt.priceDelta !== 0;
+              const hasMultiplier =
+                opt.priceMultiplier !== undefined &&
+                Number.isFinite(opt.priceMultiplier) &&
+                opt.priceMultiplier !== 1;
               return (
                 <button
                   key={opt.id}
@@ -139,10 +148,15 @@ export const ServiceConfigurator: React.FC<ServiceConfiguratorProps> = ({
                   }`}
                 >
                   <div className="truncate">{opt.label}</div>
-                  {opt.priceDelta !== 0 && (
-                    <div className="text-[11px] font-mono-num text-[var(--pos-primary)] mt-0.5">
-                      {opt.priceDelta > 0 ? '+' : ''}
-                      {formatCurrency(opt.priceDelta, settings.taxAndCurrency)}
+                  {(hasDelta || hasMultiplier) && (
+                    <div className="text-[11px] font-mono-num text-[var(--pos-primary)] mt-0.5 flex items-center gap-1.5">
+                      {hasDelta && (
+                        <span>
+                          {opt.priceDelta > 0 ? '+' : ''}
+                          {formatCurrency(opt.priceDelta, settings.taxAndCurrency)}
+                        </span>
+                      )}
+                      {hasMultiplier && <span>×{opt.priceMultiplier}</span>}
                     </div>
                   )}
                 </button>

@@ -184,15 +184,17 @@ export interface ServiceAttributeOption {
   priceMultiplier?: number;
 }
 
+export type StandardServiceAttributeKey =
+  | 'paperSize'
+  | 'paperType'
+  | 'paperThickness'
+  | 'colorMode'
+  | 'sides'
+  | 'finishing'
+  | 'materialType';
+
 export interface ServiceAttributeGroup {
-  key:
-    | 'paperSize'
-    | 'paperType'
-    | 'paperThickness'
-    | 'colorMode'
-    | 'sides'
-    | 'finishing'
-    | 'materialType';
+  key: StandardServiceAttributeKey | (string & {});
   label: string;
   options: ServiceAttributeOption[];
   defaultOptionId: string;

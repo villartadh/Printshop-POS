@@ -1,27 +1,30 @@
 import React, { useMemo, useState } from 'react';
-import { Archive, Edit3, Plus, Star, Trash2 } from 'lucide-react';
+import {
+  Archive,
+  Copy,
+  Edit3,
+  Plus,
+  Sparkles,
+  Star,
+  Trash2,
+} from 'lucide-react';
 import { useApp } from '../../context/AppContext.tsx';
 import { formatCurrency } from '../../shared/pricingEngine.ts';
-import type { PricingMethod, PrintService } from '../../shared/types.ts';
-import { Button, Card, Input, Select, StatusIndicator } from '../../components/ui/Primitives.tsx';
+import {
+  SERVICE_BLUEPRINTS,
+  instantiateServiceFromBlueprint,
+} from '../../shared/serviceTemplates.ts';
+import type { PrintService } from '../../shared/types.ts';
+import {
+  Button,
+  Card,
+  Input,
+  Select,
+  StatusIndicator,
+} from '../../components/ui/Primitives.tsx';
 import { DataTable } from '../../components/ui/DataTable.tsx';
-import { Modal } from '../../components/ui/Overlays.tsx';
-import { AVAILABLE_SERVICE_ICONS, ServiceIcon } from '../../components/ui/ServiceIcon.tsx';
-
-const PRICING_METHODS: Array<{ value: PricingMethod; label: string }> = [
-  { value: 'per_page', label: 'Per Page' },
-  { value: 'per_sheet', label: 'Per Sheet' },
-  { value: 'per_copy', label: 'Per Copy' },
-  { value: 'per_piece', label: 'Per Piece' },
-  { value: 'per_set', label: 'Per Set' },
-  { value: 'per_sqft', label: 'Per Square Foot' },
-  { value: 'per_linear_ft', label: 'Per Linear Foot' },
-  { value: 'per_meter', label: 'Per Meter' },
-  { value: 'per_hour', label: 'Per Hour' },
-  { value: 'fixed', label: 'Fixed Service Price' },
-  { value: 'tiered_bulk', label: 'Bulk Tiered Pricing' },
-  { value: 'formula', label: 'Formula-Based Pricing' },
-];
+import { ServiceIcon } from '../../components/ui/ServiceIcon.tsx';
+import { ServiceEditorModal } from '../../components/services/ServiceEditorModal.tsx';
 
 export const ServicesModule: React.FC = () => {
   const {
@@ -32,8 +35,10 @@ export const ServicesModule: React.FC = () => {
     createCategory,
     deleteCategory,
     saveService,
+    duplicateService,
     deleteService,
     session,
+    notify,
   } = useApp();
 
   const taxCurr = settings.taxAndCurrency;
@@ -41,125 +46,85 @@ export const ServicesModule: React.FC = () => {
 
   const [tab, setTab] = useState<'services' | 'categories'>('services');
   const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('all');
   const [showArchived, setShowArchived] = useState(false);
-  const [editorOpen, setEditorOpen] = useState(false);
+  const [showBlueprints, setShowBlueprints] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
 
-  // Service Form State
-  const [editingId, setEditingId] = useState<string | undefined>(undefined);
-  const [name, setName] = useState('');
-  const [sku, setSku] = useState('');
-  const [categoryId, setCategoryId] = useState(categories[0]?.id || '');
-  const [description, setDescription] = useState('');
-  const [iconName, setIconName] = useState('Printer');
-  const [pricingMethod, setPricingMethod] = useState<PricingMethod>('per_page');
-  const [basePrice, setBasePrice] = useState('5');
-  const [unitLabel, setUnitLabel] = useState('page');
-  const [costEstimate, setCostEstimate] = useState('1');
-  const [formulaExpression, setFormulaExpression] = useState('');
-  const [requiresConfiguration, setRequiresConfiguration] = useState(true);
-  const [requiresProductionJob, setRequiresProductionJob] = useState(false);
-  const [allowCustomDimensions, setAllowCustomDimensions] = useState(false);
-  const [allowPagesAndCopies, setAllowPagesAndCopies] = useState(true);
-  const [allowRushFee, setAllowRushFee] = useState(true);
-  const [rushFeePercent, setRushFeePercent] = useState('25');
-  const [isFavorite, setIsFavorite] = useState(false);
-  const [consumableId, setConsumableId] = useState('');
-  const [consumableQty, setConsumableQty] = useState('1');
+  // Editor state
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingService, setEditingService] = useState<PrintService | null>(null);
+  const [initialDraft, setInitialDraft] = useState<Omit<PrintService, 'id' | 'updatedAt'> | null>(
+    null,
+  );
+  const [cloningId, setCloningId] = useState<string | null>(null);
 
   const openNewEditor = () => {
-    setEditingId(undefined);
-    setName('');
-    setSku(`SRV-${Date.now().toString().slice(-4)}`);
-    setCategoryId(categories[0]?.id || '');
-    setDescription('');
-    setIconName('Printer');
-    setPricingMethod('per_page');
-    setBasePrice('5');
-    setUnitLabel('page');
-    setCostEstimate('1');
-    setFormulaExpression('');
-    setRequiresConfiguration(true);
-    setRequiresProductionJob(false);
-    setAllowCustomDimensions(false);
-    setAllowPagesAndCopies(true);
-    setAllowRushFee(true);
-    setRushFeePercent('25');
-    setIsFavorite(false);
-    setConsumableId('');
-    setConsumableQty('1');
+    setEditingService(null);
+    setInitialDraft(null);
     setEditorOpen(true);
   };
 
-  const openEditEditor = (s: PrintService) => {
-    setEditingId(s.id);
-    setName(s.name);
-    setSku(s.sku);
-    setCategoryId(s.categoryId);
-    setDescription(s.description);
-    setIconName(s.iconName);
-    setPricingMethod(s.pricingMethod);
-    setBasePrice(String(s.basePrice));
-    setUnitLabel(s.unitLabel);
-    setCostEstimate(String(s.costEstimate));
-    setFormulaExpression(s.formulaExpression || '');
-    setRequiresConfiguration(s.requiresConfiguration);
-    setRequiresProductionJob(s.requiresProductionJob);
-    setAllowCustomDimensions(s.allowCustomDimensions);
-    setAllowPagesAndCopies(s.allowPagesAndCopies);
-    setAllowRushFee(s.allowRushFee);
-    setRushFeePercent(String(s.rushFeePercent));
-    setIsFavorite(s.isFavorite);
-    setConsumableId(s.consumables[0]?.inventoryItemId || '');
-    setConsumableQty(String(s.consumables[0]?.quantityPerUnit || 1));
+  const openBlueprintEditor = (blueprintId: string) => {
+    const bp = SERVICE_BLUEPRINTS.find((b) => b.id === blueprintId);
+    if (!bp) return;
+    setEditingService(null);
+    setInitialDraft(instantiateServiceFromBlueprint(bp, categories, services));
+    setEditorOpen(true);
+    setShowBlueprints(false);
+  };
+
+  const openEditEditor = (service: PrintService) => {
+    setEditingService(service);
+    setInitialDraft(null);
     setEditorOpen(true);
   };
 
-  const handleSaveService = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const existing = services.find((s) => s.id === editingId);
-    await saveService({
-      id: editingId,
-      name,
-      sku,
-      categoryId,
-      description,
-      iconName,
-      pricingMethod,
-      basePrice: Number(basePrice) || 0,
-      unitLabel,
-      costEstimate: Number(costEstimate) || 0,
-      formulaExpression,
-      requiresConfiguration,
-      requiresProductionJob,
-      allowCustomDimensions,
-      allowPagesAndCopies,
-      allowRushFee,
-      rushFeePercent: Number(rushFeePercent) || 25,
-      defaultDesignFee: existing?.defaultDesignFee || 0,
-      bulkTiers: existing?.bulkTiers || [],
-      attributeGroups: existing?.attributeGroups || [],
-      consumables: consumableId
-        ? [{ inventoryItemId: consumableId, quantityPerUnit: Number(consumableQty) || 1 }]
-        : [],
-      isFavorite,
-      isArchived: existing?.isArchived || false,
-    });
-    setEditorOpen(false);
+  const handleCloneService = async (service: PrintService) => {
+    setCloningId(service.id);
+    try {
+      const cloned = await duplicateService(service.id);
+      setEditingService(cloned);
+      setInitialDraft(null);
+      setEditorOpen(true);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Unable to clone service.', 'error');
+    } finally {
+      setCloningId(null);
+    }
   };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return services
       .filter((s) => (showArchived ? true : !s.isArchived))
+      .filter((s) => categoryFilter === 'all' || s.categoryId === categoryFilter)
       .filter(
         (s) =>
           !q ||
           s.name.toLowerCase().includes(q) ||
           s.sku.toLowerCase().includes(q) ||
-          s.description.toLowerCase().includes(q),
+          s.description.toLowerCase().includes(q) ||
+          s.pricingMethod.replace(/_/g, ' ').toLowerCase().includes(q),
       );
-  }, [services, showArchived, search]);
+  }, [services, showArchived, categoryFilter, search]);
+
+  const describeServiceRules = (s: PrintService) => {
+    const parts: string[] = [];
+    if (s.attributeGroups.length > 0) {
+      parts.push(`${s.attributeGroups.length} option group${s.attributeGroups.length > 1 ? 's' : ''}`);
+    }
+    if (s.bulkTiers.length > 0) {
+      parts.push(`${s.bulkTiers.length} bulk tier${s.bulkTiers.length > 1 ? 's' : ''}`);
+    }
+    if (s.consumables.length > 0) {
+      parts.push(`${s.consumables.length} material${s.consumables.length > 1 ? 's' : ''}`);
+    }
+    if (s.formulaExpression) {
+      parts.push('formula');
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'Standard flat rule';
+  };
 
   return (
     <div className="space-y-4">
@@ -167,11 +132,11 @@ export const ServicesModule: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-[var(--pos-text)]">Printing Services & Pricing</h1>
           <p className="text-xs text-[var(--pos-text-muted)]">
-            Configure service pricing rules, bulk tiers, formulas, and material consumption
+            Build reusable blueprints, dynamic option groups, bulk tiers, formulas, and material bindings
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg">
             <button
               type="button"
@@ -197,22 +162,86 @@ export const ServicesModule: React.FC = () => {
             </button>
           </div>
           {canEdit && tab === 'services' && (
-            <Button size="sm" onClick={openNewEditor}>
-              <Plus className="w-4 h-4" />
-              Add Service
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowBlueprints((prev) => !prev)}
+              >
+                <Sparkles className="w-4 h-4" />
+                Blueprints
+              </Button>
+              <Button size="sm" onClick={openNewEditor}>
+                <Plus className="w-4 h-4" />
+                Add Service
+              </Button>
+            </>
           )}
         </div>
       </div>
 
       {tab === 'services' ? (
         <>
+          {canEdit && showBlueprints && (
+            <Card className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-[var(--pos-text)]">
+                    Reusable Service Blueprints
+                  </h2>
+                  <p className="text-xs text-[var(--pos-text-muted)]">
+                    Scaffold a pre-configured service with dynamic option groups, tiers, and pricing flags
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowBlueprints(false)}
+                  className="text-xs text-[var(--pos-text-muted)] hover:text-[var(--pos-text)] cursor-pointer"
+                >
+                  Hide
+                </button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {SERVICE_BLUEPRINTS.map((bp) => (
+                  <button
+                    key={bp.id}
+                    type="button"
+                    onClick={() => openBlueprintEditor(bp.id)}
+                    className="text-left p-3 rounded-lg border border-[var(--pos-border)] hover:border-[var(--pos-primary)] hover:bg-[var(--pos-primary)]/5 transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-[var(--pos-text)]">
+                        {bp.name}
+                      </span>
+                      <span className="text-[11px] font-mono-num text-[var(--pos-primary)] font-medium">
+                        {formatCurrency(bp.basePrice, taxCurr)}/{bp.unitLabel}
+                      </span>
+                    </div>
+                    <p className="text-xs text-[var(--pos-text-muted)] mt-1 line-clamp-2">
+                      {bp.tagline}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex-1 min-w-[220px]">
               <Input
-                placeholder="Search service name or SKU..."
+                placeholder="Search service name, SKU, or pricing method..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <div className="w-full sm:w-52">
+              <Select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                options={[
+                  { value: 'all', label: 'All Categories' },
+                  ...categories.map((c) => ({ value: c.id, label: c.name })),
+                ]}
               />
             </div>
             <label className="flex items-center gap-2 text-xs text-[var(--pos-text-muted)] cursor-pointer">
@@ -232,19 +261,20 @@ export const ServicesModule: React.FC = () => {
             columns={[
               {
                 key: 'name',
-                label: 'Service',
+                label: 'Service & Dynamic Rules',
                 render: (s) => (
                   <div className="flex items-center gap-2.5">
                     <div className="h-8 w-8 rounded-lg bg-[var(--pos-primary)]/10 text-[var(--pos-primary)] flex items-center justify-center shrink-0">
                       <ServiceIcon name={s.iconName} className="w-4 h-4" />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <div className="text-sm font-semibold text-[var(--pos-text)] flex items-center gap-1.5">
-                        <span>{s.name}</span>
-                        {s.isFavorite && <Star className="w-3 h-3 text-[#D97706] fill-current" />}
+                        <span className="truncate">{s.name}</span>
+                        {s.isFavorite && <Star className="w-3 h-3 text-[#D97706] fill-current shrink-0" />}
                       </div>
-                      <div className="text-[11px] text-[var(--pos-text-muted)]">
-                        {s.sku} · {categories.find((c) => c.id === s.categoryId)?.name || 'Uncategorized'}
+                      <div className="text-[11px] text-[var(--pos-text-muted)] truncate">
+                        {s.sku} · {categories.find((c) => c.id === s.categoryId)?.name || 'Uncategorized'} ·{' '}
+                        {describeServiceRules(s)}
                       </div>
                     </div>
                   </div>
@@ -262,13 +292,22 @@ export const ServicesModule: React.FC = () => {
               },
               {
                 key: 'price',
-                label: 'Base Rate',
+                label: 'Base Rate / Margin',
                 align: 'right',
-                render: (s) => (
-                  <span className="font-mono-num font-semibold">
-                    {formatCurrency(s.basePrice, taxCurr)} / {s.unitLabel}
-                  </span>
-                ),
+                render: (s) => {
+                  const marginPct =
+                    s.basePrice > 0 ? ((s.basePrice - s.costEstimate) / s.basePrice) * 100 : 0;
+                  return (
+                    <div className="text-right">
+                      <div className="font-mono-num font-semibold text-sm text-[var(--pos-text)]">
+                        {formatCurrency(s.basePrice, taxCurr)} / {s.unitLabel}
+                      </div>
+                      <div className="text-[11px] font-mono-num text-[var(--pos-text-muted)]">
+                        Cost {formatCurrency(s.costEstimate, taxCurr)} · {marginPct.toFixed(0)}% margin
+                      </div>
+                    </div>
+                  );
+                },
               },
               {
                 key: 'status',
@@ -290,6 +329,25 @@ export const ServicesModule: React.FC = () => {
                     <div className="inline-flex items-center gap-1">
                       <button
                         type="button"
+                        onClick={() => void saveService({ ...s, isFavorite: !s.isFavorite })}
+                        className={`p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer ${
+                          s.isFavorite ? 'text-[#D97706]' : 'text-[var(--pos-text-muted)]'
+                        }`}
+                        title={s.isFavorite ? 'Remove favorite' : 'Pin to favorites'}
+                      >
+                        <Star className={`w-4 h-4 ${s.isFavorite ? 'fill-current' : ''}`} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleCloneService(s)}
+                        disabled={cloningId === s.id}
+                        className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-40"
+                        title="Clone / Reuse service"
+                      >
+                        <Copy className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => openEditEditor(s)}
                         className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                         title="Edit"
@@ -298,9 +356,7 @@ export const ServicesModule: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
-                          void saveService({ ...s, isArchived: !s.isArchived })
-                        }
+                        onClick={() => void saveService({ ...s, isArchived: !s.isArchived })}
                         className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                         title={s.isArchived ? 'Restore' : 'Archive'}
                       >
@@ -366,142 +422,17 @@ export const ServicesModule: React.FC = () => {
         </Card>
       )}
 
-      {/* Service Editor Modal */}
-      <Modal
+      <ServiceEditorModal
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
-        title={editingId ? 'Edit Printing Service' : 'New Printing Service'}
-        maxWidth="lg"
-      >
-        <form onSubmit={handleSaveService} className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Input
-              label="Service Name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-            />
-            <Input label="SKU / Barcode" value={sku} onChange={(e) => setSku(e.target.value)} required />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <Select
-              label="Category"
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              options={categories.map((c) => ({ value: c.id, label: c.name }))}
-            />
-            <Select
-              label="Pricing Method"
-              value={pricingMethod}
-              onChange={(e) => setPricingMethod(e.target.value as PricingMethod)}
-              options={PRICING_METHODS}
-            />
-            <Select
-              label="Icon"
-              value={iconName}
-              onChange={(e) => setIconName(e.target.value)}
-              options={AVAILABLE_SERVICE_ICONS.map((ic) => ({ value: ic, label: ic }))}
-            />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <Input
-              label={`Base Price (${taxCurr.currencySymbol})`}
-              type="number"
-              min="0"
-              step="0.01"
-              value={basePrice}
-              onChange={(e) => setBasePrice(e.target.value)}
-              required
-            />
-            <Input
-              label="Unit Label"
-              placeholder="page, sq ft, pc"
-              value={unitLabel}
-              onChange={(e) => setUnitLabel(e.target.value)}
-              required
-            />
-            <Input
-              label={`Estimated Cost (${taxCurr.currencySymbol})`}
-              type="number"
-              min="0"
-              step="0.01"
-              value={costEstimate}
-              onChange={(e) => setCostEstimate(e.target.value)}
-            />
-          </div>
-
-          {pricingMethod === 'formula' && (
-            <Input
-              label="Custom Pricing Formula"
-              placeholder="e.g. base * areaSqFt * copies + designFee"
-              hint="Available variables: base, qty, pages, copies, areaSqFt, linearFt, linearMeters, attrDelta, attrMult, designFee, laborFee"
-              value={formulaExpression}
-              onChange={(e) => setFormulaExpression(e.target.value)}
-            />
-          )}
-
-          <Input
-            label="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Select
-              label="Consumable Deduction Binding (Optional)"
-              value={consumableId}
-              onChange={(e) => setConsumableId(e.target.value)}
-              options={[
-                { value: '', label: 'None' },
-                ...inventory.map((i) => ({ value: i.id, label: `${i.name} (${i.unit})` })),
-              ]}
-            />
-            {consumableId && (
-              <Input
-                label="Quantity Consumed per Unit"
-                type="number"
-                min="0.1"
-                step="0.1"
-                value={consumableQty}
-                onChange={(e) => setConsumableQty(e.target.value)}
-              />
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-            {[
-              { label: 'Show Configurator on Tap', checked: requiresConfiguration, set: setRequiresConfiguration },
-              { label: 'Create Production Job', checked: requiresProductionJob, set: setRequiresProductionJob },
-              { label: 'Custom Width × Height', checked: allowCustomDimensions, set: setAllowCustomDimensions },
-              { label: 'Pages & Copies Controls', checked: allowPagesAndCopies, set: setAllowPagesAndCopies },
-              { label: 'Allow Rush Fee', checked: allowRushFee, set: setAllowRushFee },
-              { label: 'Pin to Favorites', checked: isFavorite, set: setIsFavorite },
-            ].map((flag) => (
-              <label
-                key={flag.label}
-                className="flex items-center gap-2 p-2.5 rounded-lg border border-[var(--pos-border)] cursor-pointer"
-              >
-                <input
-                  type="checkbox"
-                  checked={flag.checked}
-                  onChange={(e) => flag.set(e.target.checked)}
-                  className="h-4 w-4 accent-[var(--pos-primary)]"
-                />
-                <span className="text-[var(--pos-text)]">{flag.label}</span>
-              </label>
-            ))}
-          </div>
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" type="button" onClick={() => setEditorOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit">Save Service</Button>
-          </div>
-        </form>
-      </Modal>
+        editingService={editingService}
+        initialDraft={initialDraft}
+        categories={categories}
+        services={services}
+        inventory={inventory}
+        taxCurrency={taxCurr}
+        onSave={saveService}
+      />
     </div>
   );
 };
